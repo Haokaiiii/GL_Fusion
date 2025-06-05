@@ -17,16 +17,11 @@ from tqdm import tqdm
 from pathlib import Path
 from sklearn.preprocessing import MinMaxScaler
 import warnings
+import geobleu # For GeoBLEU and DTW
+from scipy.spatial import cKDTree
 
 # Add the src directory to the path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-# Add geobleu to path if not already installed in environment
-# This assumes geobleu-2023 directory is at the project root
-geobleu_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'geobleu-2023')
-if geobleu_path not in sys.path:
-    sys.path.insert(0, geobleu_path)
-import geobleu # For GeoBLEU and DTW
 
 from model.gl_fusion_model import GLFusionModel
 from training.utils import calculate_metrics
@@ -177,27 +172,37 @@ def load_test_data(config, task_id, split='val'):
 
 def inverse_transform_predictions(predictions, x_scaler, y_scaler):
     """Inverse transform scaled predictions back to original coordinate space."""
-    pred_x_scaled = predictions[0].reshape(-1, 1)
-    pred_y_scaled = predictions[1].reshape(-1, 1)
+    # Clamp predictions to valid range [0, 1] to prevent invalid coordinates
+    pred_x_clamped = max(0.0, min(1.0, predictions[0]))
+    pred_y_clamped = max(0.0, min(1.0, predictions[1]))
+    
+    pred_x_scaled = [[pred_x_clamped]]
+    pred_y_scaled = [[pred_y_clamped]]
     
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=UserWarning, message="X does not have valid feature names")
         pred_x_original = x_scaler.inverse_transform(pred_x_scaled)
         pred_y_original = y_scaler.inverse_transform(pred_y_scaled)
     
-    return np.array([pred_x_original[0,0], pred_y_original[0,0]])
+    return np.array([pred_x_original[0][0], pred_y_original[0][0]])
 
 
 def evaluate_validation_set(model, test_sequences, task_df, indices, node_mapping, device, x_scaler, y_scaler):
     """
     Evaluate the model on the validation set with proper coordinate scaling.
+    For Task 2: Use days 1-59 as input to predict days 60-74 (to match validator expectations).
     """
     all_predictions = []
     all_targets = []
     prediction_records = []
     user_geobleu_scores = []
     user_dtw_scores = []
-    
+
+    # Create a KD-tree for fast nearest neighbor search of node coordinates
+    node_coords_list = list(node_mapping.keys())
+    node_coords_array = np.array(node_coords_list)
+    kdtree = cKDTree(node_coords_array)
+
     # Get unique users in the validation set
     all_val_users = set(task_df.iloc[indices]['uid'].values)
 
@@ -216,41 +221,44 @@ def evaluate_validation_set(model, test_sequences, task_df, indices, node_mappin
         if uid not in test_sequences:
             continue
         
-        # Get the user's sequence
+        # Get the user's sequence and data
         node_seq = test_sequences[uid]
-        
-        # Get the user's data from the validation set
         user_df = task_df[(task_df['uid'] == uid) & task_df.index.isin(indices)].sort_values(by=['d', 't'])
         
         # Skip if not enough data
         if len(user_df) < 2:
             continue
+
+        # For Task 2: Use days 1-59 to predict days 60-74 (to match validator expectations)
+        # Get training data (days 1-59) and target data (days 60-74)
+        train_data = user_df[user_df['d'] <= 59]
+        target_data = user_df[(user_df['d'] >= 60) & (user_df['d'] <= 74)]
         
+        if len(train_data) == 0 or len(target_data) == 0:
+            continue  # Skip users without proper train/target split
+            
+        # Use the last sequence from training period (day 59) as input context
+        train_end_idx = len(train_data) - 1
+        seq_len = 24  # Use last 24 locations from training period
+        
+        if train_end_idx + 1 >= seq_len:
+            current_input_seq = node_seq[train_end_idx - seq_len + 1 : train_end_idx + 1]
+        else:
+            padding = [0] * (seq_len - (train_end_idx + 1))
+            current_input_seq = padding + node_seq[:train_end_idx + 1]
+
         # Collect predicted and target trajectories for the current user
         user_predicted_trajectory = []
         user_target_trajectory = []
 
-        for i in range(len(user_df) - 1):
-            # Get the current and target location info
-            current_row = user_df.iloc[i]
-            current_d = current_row['d']
-            current_t = current_row['t']
-            
-            target_row = user_df.iloc[i + 1]
+        # Predict each day in the emergency period (days 60-74)
+        for _, target_row in target_data.iterrows():
             target_d = target_row['d']
             target_t = target_row['t']
             target_coords = np.array([target_row['x'], target_row['y']])
             
-            # Extract the sequence up to the current point
-            seq_len = 24  # Use the last 24 locations
-            if i >= seq_len:
-                input_seq = node_seq[i - seq_len + 1:i + 1]
-            else:
-                # Pad with zeros if needed
-                input_seq = [0] * (seq_len - i - 1) + node_seq[:i + 1]
-            
             # Prepare input for the model
-            input_tensor = torch.tensor(input_seq, dtype=torch.long).unsqueeze(0).to(device)
+            input_tensor = torch.tensor(current_input_seq, dtype=torch.long).unsqueeze(0).to(device)
             attention_mask = (input_tensor > 0).long()
             node_seq_mapping = input_tensor.clone()
             
@@ -268,10 +276,17 @@ def evaluate_validation_set(model, test_sequences, task_df, indices, node_mappin
             else:
                 predictions_tensor = predictions_dict
             
-            # Convert prediction to numpy and inverse-transform
+            # Convert prediction to numpy and inverse-transform with clamping
             pred_coords_scaled = predictions_tensor.cpu().numpy()[0]
             pred_coords = inverse_transform_predictions(pred_coords_scaled, x_scaler, y_scaler)
             
+            # Find the nearest node ID for the predicted coordinates to make predictions autoregressive
+            dist, idx = kdtree.query(pred_coords)
+            predicted_node_id = node_mapping[tuple(node_coords_array[idx])]
+            
+            # Update the input sequence for the next prediction
+            current_input_seq = current_input_seq[1:] + [predicted_node_id]
+
             # Store predictions and targets
             all_predictions.append(pred_coords)
             all_targets.append(target_coords)
@@ -283,8 +298,8 @@ def evaluate_validation_set(model, test_sequences, task_df, indices, node_mappin
             # Store the prediction record
             prediction_records.append({
                 'uid': uid,
-                'current_d': current_d,
-                'current_t': current_t,
+                'current_d': 59,  # Input context ends at day 59
+                'current_t': train_data.iloc[-1]['t'] if len(train_data) > 0 else 0,  # Last time from training
                 'target_d': target_d,
                 'target_t': target_t,
                 'pred_x': pred_coords[0],
