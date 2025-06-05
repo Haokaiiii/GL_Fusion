@@ -16,6 +16,7 @@ import pickle
 from tqdm import tqdm
 from pathlib import Path
 from sklearn.preprocessing import MinMaxScaler
+import warnings
 
 # Add the src directory to the path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -179,8 +180,10 @@ def inverse_transform_predictions(predictions, x_scaler, y_scaler):
     pred_x_scaled = predictions[0].reshape(-1, 1)
     pred_y_scaled = predictions[1].reshape(-1, 1)
     
-    pred_x_original = x_scaler.inverse_transform(pred_x_scaled)
-    pred_y_original = y_scaler.inverse_transform(pred_y_scaled)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning, message="X does not have valid feature names")
+        pred_x_original = x_scaler.inverse_transform(pred_x_scaled)
+        pred_y_original = y_scaler.inverse_transform(pred_y_scaled)
     
     return np.array([pred_x_original[0,0], pred_y_original[0,0]])
 
