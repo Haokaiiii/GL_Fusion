@@ -817,128 +817,169 @@ def load_data_for_training(config, task_id=1, rank=0, world_size=1):
         if not train_val_split_path.exists():
             raise FileNotFoundError(f"Train/Val split file not found: {train_val_split_path}. Run preprocess.py.")
         
-        with open(train_val_split_path, 'rb') as f: train_val_split = pickle.load(f)
+        with open(train_val_split_path, 'rb') as f: 
+            train_val_split = pickle.load(f)
         train_split_ids = train_val_split.get('train', [])
         val_split_ids = train_val_split.get('val', [])
 
         test_split_ids = [] 
         if test_split_path.exists():
-            with open(test_split_path, 'rb') as f: test_split_ids = pickle.load(f).get('test', [])
+            with open(test_split_path, 'rb') as f: 
+                test_split_ids = pickle.load(f).get('test', [])
     except Exception as e:
-            logger.error(f"[Rank {rank}] Failed to load essential raw data or split files: {e}", exc_info=True)
-            raise RuntimeError(f"[Rank {rank}] Prerequisite data files missing or unreadable. Ensure preprocessing is complete.") from e
+        logger.error(f"[Rank {rank}] Failed to load essential raw data or split files: {e}", exc_info=True)
+        raise RuntimeError(f"[Rank {rank}] Prerequisite data files missing or unreadable. Ensure preprocessing is complete.") from e
     
+    node_sequences_data = None # Initialize node_sequences_data
     if is_main_process:
-            logger.info(f"[Rank {rank}] Main process: attempting to create/cache datasets.")
+        logger.info(f"[Rank {rank}] Main process: attempting to create/cache datasets.")
+        try:
+            llm_prepared_dir = Path(data_config['llm_prepared_dir'])
+            node_sequences_file_path = llm_prepared_dir / f'llm_sequences_train_val_task{task_id}.pt'
+            if not node_sequences_file_path.exists():
+                err_msg = f"[Rank {rank}] Node sequences file not found: {node_sequences_file_path}. Run preprocess.py to generate it."
+                logger.error(err_msg)
+                raise FileNotFoundError(err_msg)
+            logger.info(f"[Rank {rank}] Loading node sequences from {node_sequences_file_path}")
             try:
-                llm_prepared_dir = Path(data_config['llm_prepared_dir'])
-                node_sequences_file_path = llm_prepared_dir / f'llm_sequences_train_val_task{task_id}.pt'
-                if not node_sequences_file_path.exists():
-                    err_msg = f"[Rank {rank}] Node sequences file not found: {node_sequences_file_path}. Run preprocess.py to generate it."
+                node_sequences_data = torch.load(node_sequences_file_path, map_location='cpu', weights_only=False)
+                if not isinstance(node_sequences_data, dict) or 'train' not in node_sequences_data or 'val' not in node_sequences_data:
+                    err_msg = f"[Rank {rank}] Node sequences data from {node_sequences_file_path} is not a valid dictionary or missing 'train'/'val' keys."
                     logger.error(err_msg)
-                    raise FileNotFoundError(err_msg)
-                logger.info(f"[Rank {rank}] Loading node sequences from {node_sequences_file_path}")
-                try:
-                    node_sequences_data = torch.load(node_sequences_file_path, map_location='cpu', weights_only=False)
-                    if not isinstance(node_sequences_data, dict) or 'train' not in node_sequences_data or 'val' not in node_sequences_data:
-                        err_msg = f"[Rank {rank}] Node sequences data from {node_sequences_file_path} is not a valid dictionary or missing 'train'/'val' keys."
-                        logger.error(err_msg)
-                        raise ValueError(err_msg)
-                    logger.info(f"[Rank {rank}] Node sequences loaded. Keys: {list(node_sequences_data.keys())}")
-                except Exception as e:
-                    logger.error(f"[Rank {rank}] Failed to load node_sequences_data from {node_sequences_file_path}: {e}", exc_info=True)
-                    raise RuntimeError(f"Failed to load node_sequences_data: {e}") from e
-    
-                logger.info(f"[Rank {rank}] Creating training dataset (Task {task_id}). Cache: {train_dataset_path}")
-        train_dataset = TrajectoryDataset(
-                    node_sequences=node_sequences_data['train'], task_df=task_df, task_split_ids=train_split_ids, task_id=task_id, split_name='train',
-                    tokenizer_path=tokenizer_path, node_text_path=node_text_path, graph_data_path=graph_data_path,
-                    sequence_length=data_config['sequence_length'], prediction_horizon=config['evaluation']['prediction_horizon'],
-                    config=config, subsample_ratio=subsample_ratio_train, description=f"[Rank {rank}] Building train samples"
-                )
-                if not train_dataset or len(train_dataset) == 0:
-                    logger.warning(f"[Rank {rank}] Training dataset is empty or invalid after creation.")
-                logger.info(f"[Rank {rank}] Training dataset created with {len(train_dataset) if train_dataset else 0} samples. Saving to cache.")
-                torch.save(train_dataset, train_dataset_path)
-                with open(train_dataset_path, 'r+b') as f:
-                    os.fsync(f.fileno())
-                logger.info(f"[Rank {rank}] Training dataset cache file written and synced to disk.")
-    
-                logger.info(f"[Rank {rank}] Creating validation dataset (Task {task_id}). Cache: {val_dataset_path}")
-        val_dataset = TrajectoryDataset(
-                    node_sequences=node_sequences_data['val'], task_df=task_df, task_split_ids=val_split_ids, task_id=task_id, split_name='val',
-                    tokenizer_path=tokenizer_path, node_text_path=node_text_path, graph_data_path=graph_data_path,
-                    sequence_length=data_config['sequence_length'], prediction_horizon=config['evaluation']['prediction_horizon'],
-                    config=config, subsample_ratio=subsample_ratio_val, description=f"[Rank {rank}] Building val samples"
-            )
-                if not val_dataset or len(val_dataset) == 0:
-                    logger.warning(f"[Rank {rank}] Validation dataset is empty or invalid after creation.")
-                logger.info(f"[Rank {rank}] Validation dataset created with {len(val_dataset) if val_dataset else 0} samples. Saving to cache.")
-                torch.save(val_dataset, val_dataset_path)
-                with open(val_dataset_path, 'r+b') as f:
-                    os.fsync(f.fileno())
-                logger.info(f"[Rank {rank}] Validation dataset cache file written and synced to disk.")
-            
-                if config['training'].get('prepare_test_dataset_too', False) and test_split_ids:
-                    logger.info(f"[Rank {rank}] Creating test dataset (Task {task_id}). Cache: {test_dataset_path}")
-                    test_dataset = TrajectoryDataset(
-                        node_sequences=node_sequences_data.get('test', {}), task_df=task_df, task_split_ids=test_split_ids, task_id=task_id, split_name='test',
-                        tokenizer_path=tokenizer_path, node_text_path=node_text_path, graph_data_path=graph_data_path,
-                        sequence_length=data_config['sequence_length'], prediction_horizon=config['evaluation']['prediction_horizon'],
-                        config=config, subsample_ratio=1.0, description=f"[Rank {rank}] Building test samples"
-                    )
-                    if test_dataset and len(test_dataset) > 0:
-                        logger.info(f"[Rank {rank}] Test dataset created with {len(test_dataset)} samples. Saving to cache.")
-                        torch.save(test_dataset, test_dataset_path)
-                        with open(test_dataset_path, 'r+b') as f:
-                            os.fsync(f.fileno())
-                        logger.info(f"[Rank {rank}] Test dataset cache file written and synced to disk.")
-                    else:
-                        logger.warning(f"[Rank {rank}] Test dataset is empty or invalid after creation. Not saving.")
-                        test_dataset = None
-                else:
-                    test_dataset = None 
-                logger.info(f"[Rank {rank}] Datasets created and cached successfully by main process.")
+                    raise ValueError(err_msg)
+                logger.info(f"[Rank {rank}] Node sequences loaded. Keys: {list(node_sequences_data.keys())}")
             except Exception as e:
-                logger.error(f"[Rank {rank}] Error during dataset creation/caching by main process: {e}", exc_info=True)
-                train_dataset, val_dataset, test_dataset = None, None, None 
-                raise RuntimeError(f"Rank {rank} (main process) failed to create/cache datasets: {e}") from e
-    
+                logger.error(f"[Rank {rank}] Failed to load node_sequences_data from {node_sequences_file_path}: {e}", exc_info=True)
+                raise RuntimeError(f"Failed to load node_sequences_data: {e}") from e
+
+            logger.info(f"[Rank {rank}] Creating training dataset (Task {task_id}). Cache: {train_dataset_path}")
+            train_dataset = TrajectoryDataset(
+                node_sequences=node_sequences_data['train'], 
+                task_df=task_df, 
+                task_split_ids=train_split_ids, 
+                task_id=task_id, 
+                split_name='train',
+                tokenizer_path=tokenizer_path, 
+                node_text_path=node_text_path, 
+                graph_data_path=graph_data_path,
+                sequence_length=data_config['sequence_length'], 
+                prediction_horizon=config['evaluation']['prediction_horizon'],
+                config=config, 
+                subsample_ratio=subsample_ratio_train, 
+                description=f"[Rank {rank}] Building train samples"
+            )
+            if not train_dataset or len(train_dataset) == 0:
+                logger.warning(f"[Rank {rank}] Training dataset is empty or invalid after creation.")
+            logger.info(f"[Rank {rank}] Training dataset created with {len(train_dataset) if train_dataset else 0} samples. Saving to cache.")
+            torch.save(train_dataset, train_dataset_path)
+            with open(train_dataset_path, 'r+b') as f:
+                os.fsync(f.fileno())
+            logger.info(f"[Rank {rank}] Training dataset cache file written and synced to disk.")
+
+            logger.info(f"[Rank {rank}] Creating validation dataset (Task {task_id}). Cache: {val_dataset_path}")
+            val_dataset = TrajectoryDataset(
+                node_sequences=node_sequences_data['val'], 
+                task_df=task_df, 
+                task_split_ids=val_split_ids, 
+                task_id=task_id, 
+                split_name='val',
+                tokenizer_path=tokenizer_path, 
+                node_text_path=node_text_path, 
+                graph_data_path=graph_data_path,
+                sequence_length=data_config['sequence_length'], 
+                prediction_horizon=config['evaluation']['prediction_horizon'],
+                config=config, 
+                subsample_ratio=subsample_ratio_val, 
+                description=f"[Rank {rank}] Building val samples"
+            )
+            if not val_dataset or len(val_dataset) == 0:
+                logger.warning(f"[Rank {rank}] Validation dataset is empty or invalid after creation.")
+            logger.info(f"[Rank {rank}] Validation dataset created with {len(val_dataset) if val_dataset else 0} samples. Saving to cache.")
+            torch.save(val_dataset, val_dataset_path)
+            with open(val_dataset_path, 'r+b') as f:
+                os.fsync(f.fileno())
+            logger.info(f"[Rank {rank}] Validation dataset cache file written and synced to disk.")
+            
+            if config['training'].get('prepare_test_dataset_too', False) and test_split_ids:
+                logger.info(f"[Rank {rank}] Creating test dataset (Task {task_id}). Cache: {test_dataset_path}")
+                test_dataset = TrajectoryDataset(
+                    node_sequences=node_sequences_data.get('test', {}), 
+                    task_df=task_df, 
+                    task_split_ids=test_split_ids, 
+                    task_id=task_id, 
+                    split_name='test',
+                    tokenizer_path=tokenizer_path, 
+                    node_text_path=node_text_path, 
+                    graph_data_path=graph_data_path,
+                    sequence_length=data_config['sequence_length'], 
+                    prediction_horizon=config['evaluation']['prediction_horizon'],
+                    config=config, 
+                    subsample_ratio=1.0, 
+                    description=f"[Rank {rank}] Building test samples"
+                )
+                if test_dataset and len(test_dataset) > 0:
+                    logger.info(f"[Rank {rank}] Test dataset created with {len(test_dataset)} samples. Saving to cache.")
+                    torch.save(test_dataset, test_dataset_path)
+                    with open(test_dataset_path, 'r+b') as f:
+                        os.fsync(f.fileno())
+                    logger.info(f"[Rank {rank}] Test dataset cache file written and synced to disk.")
+                else:
+                    logger.warning(f"[Rank {rank}] Test dataset is empty or invalid after creation. Not saving.")
+                    test_dataset = None
+            else:
+                test_dataset = None 
+            logger.info(f"[Rank {rank}] Datasets created and cached successfully by main process.")
+        except Exception as e:
+            logger.error(f"[Rank {rank}] Error during dataset creation/caching by main process: {e}", exc_info=True)
+            train_dataset, val_dataset, test_dataset = None, None, None 
+            raise RuntimeError(f"Rank {rank} (main process) failed to create/cache datasets: {e}") from e
+
     if world_size > 1:
         logger.info(f"[Rank {rank}] Waiting at barrier after dataset creation/before loading...")
         dist.barrier()
         logger.info(f"[Rank {rank}] Passed barrier after dataset creation.")
-    
-    if not is_main_process:
+
+    if not is_main_process: # Non-main processes load from cache
         logger.info(f"[Rank {rank}] Non-main process: attempting to load datasets from cache.")
+        # Ensure node_sequences_data is loaded if not already (e.g. if main process failed before caching it)
+        # This part is tricky because node_sequences_data is needed by TrajectoryDataset
+        # For simplicity here, we assume main process succeeded if we reach this point after barrier.
+        # A more robust solution might involve broadcasting node_sequences_data or having all ranks load it.
+        
         if not file_exists_timeout(train_dataset_path, timeout=600):
-                err_msg = (f"[Rank {rank}] Training dataset cache file not found after waiting: {train_dataset_path}. "
+            err_msg = (f"[Rank {rank}] Training dataset cache file not found after waiting: {train_dataset_path}. "
                        f"Ensure rank 0 completes dataset creation and caching.")
-                logger.error(err_msg)
-                raise RuntimeError(err_msg)
+            logger.error(err_msg)
+            raise RuntimeError(err_msg)
         if not file_exists_timeout(val_dataset_path, timeout=600):
-                err_msg = (f"[Rank {rank}] Validation dataset cache file not found after waiting: {val_dataset_path}. "
+            err_msg = (f"[Rank {rank}] Validation dataset cache file not found after waiting: {val_dataset_path}. "
                        f"Ensure rank 0 completes dataset creation and caching.")
-                logger.error(err_msg)
-                raise RuntimeError(err_msg)
+            logger.error(err_msg)
+            raise RuntimeError(err_msg)
         try:
             logger.info(f"[Rank {rank}] Loading training dataset from cache: {train_dataset_path}")
             train_dataset = torch.load(train_dataset_path, map_location='cpu', weights_only=False)
-            if not train_dataset or len(train_dataset) == 0: logger.warning(f"[Rank {rank}] Loaded training dataset is empty or invalid.")
-            else: logger.info(f"[Rank {rank}] Training dataset loaded with {len(train_dataset)} samples.")
+            if not train_dataset or len(train_dataset) == 0: 
+                logger.warning(f"[Rank {rank}] Loaded training dataset is empty or invalid.")
+            else: 
+                logger.info(f"[Rank {rank}] Training dataset loaded with {len(train_dataset)} samples.")
 
             logger.info(f"[Rank {rank}] Loading validation dataset from cache: {val_dataset_path}")
             val_dataset = torch.load(val_dataset_path, map_location='cpu', weights_only=False)
-            if not val_dataset or len(val_dataset) == 0: logger.warning(f"[Rank {rank}] Loaded validation dataset is empty or invalid.")
-            else: logger.info(f"[Rank {rank}] Validation dataset loaded with {len(val_dataset)} samples.")
+            if not val_dataset or len(val_dataset) == 0: 
+                logger.warning(f"[Rank {rank}] Loaded validation dataset is empty or invalid.")
+            else: 
+                logger.info(f"[Rank {rank}] Validation dataset loaded with {len(val_dataset)} samples.")
             
-            if test_dataset_path.exists():
+            if config['training'].get('prepare_test_dataset_too', False) and test_split_path.exists() and test_dataset_path.exists(): # check if test dataset should be loaded
                 logger.info(f"[Rank {rank}] Loading test dataset from cache: {test_dataset_path}")
                 test_dataset = torch.load(test_dataset_path, map_location='cpu', weights_only=False)
-                if test_dataset and len(test_dataset) > 0: logger.info(f"[Rank {rank}] Test dataset loaded with {len(test_dataset)} samples.")
-                else: logger.warning(f"[Rank {rank}] Loaded test dataset is empty or invalid.")
+                if test_dataset and len(test_dataset) > 0: 
+                    logger.info(f"[Rank {rank}] Test dataset loaded with {len(test_dataset)} samples.")
+                else: 
+                    logger.warning(f"[Rank {rank}] Loaded test dataset is empty or invalid.")
             else:
-                test_dataset = None
+                test_dataset = None # Ensure test_dataset is None if not loaded
             logger.info(f"[Rank {rank}] Datasets loaded from cache successfully by non-main process.")
         except Exception as e:
             logger.error(f"[Rank {rank}] Error loading datasets from cache by non-main process: {e}", exc_info=True)
@@ -958,26 +999,35 @@ def load_data_for_training(config, task_id=1, rank=0, world_size=1):
         if train_dataset and len(train_dataset) > 0:
             train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=shuffle_train, seed=seed)
         else:
-            logger.error(f"[Rank {rank}] Train dataset is None or empty, cannot create DistributedSampler.")
+            logger.warning(f"[Rank {rank}] Train dataset is None or empty, cannot create DistributedSampler.") # Changed to warning
+            train_sampler = None # Ensure sampler is None
         if val_dataset and len(val_dataset) > 0:
             val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False, seed=seed)
         else:
-            logger.error(f"[Rank {rank}] Val dataset is None or empty, cannot create DistributedSampler.")
+            logger.warning(f"[Rank {rank}] Val dataset is None or empty, cannot create DistributedSampler.") # Changed to warning
+            val_sampler = None # Ensure sampler is None
         if test_dataset and len(test_dataset) > 0:
             test_sampler = DistributedSampler(test_dataset, num_replicas=world_size, rank=rank, shuffle=False, seed=seed)
-    else: 
+        else: # Ensure sampler is None if dataset is None or empty
+            test_sampler = None
+    else: # Single process
         if train_dataset and len(train_dataset) > 0:
             train_sampler = RandomSampler(train_dataset) if shuffle_train else SequentialSampler(train_dataset)
         else:
-            logger.error(f"[Rank {rank}] Train dataset is None or empty, cannot create Sampler.")
+            logger.warning(f"[Rank {rank}] Train dataset is None or empty, cannot create Sampler.") # Changed to warning
+            train_sampler = None
         if val_dataset and len(val_dataset) > 0:
             val_sampler = SequentialSampler(val_dataset)
         else:
-            logger.error(f"[Rank {rank}] Val dataset is None or empty, cannot create Sampler.")
+            logger.warning(f"[Rank {rank}] Val dataset is None or empty, cannot create Sampler.") # Changed to warning
+            val_sampler = None
         if test_dataset and len(test_dataset) > 0:
             test_sampler = SequentialSampler(test_dataset)
+        else:
+            test_sampler = None
 
-    logger.info(f"[Rank {rank}] load_data_for_training complete. Train sampler: {'Exists' if train_sampler else 'None'}. Val sampler: {'Exists' if val_sampler else 'None'}.")
+
+    logger.info(f"[Rank {rank}] load_data_for_training complete. Train sampler: {'Exists' if train_sampler else 'None'}. Val sampler: {'Exists' if val_sampler else 'None'}. Test sampler: {'Exists' if test_sampler else 'None'}")
     return train_dataset, val_dataset, test_dataset, train_sampler, val_sampler, test_sampler
 
 
