@@ -1,5 +1,6 @@
 """
-Evaluation script for the GL-Fusion model.
+Enhanced evaluation script for the GL-Fusion model with coordinate scaling support.
+This script properly handles tokenizer size mismatches and coordinate inverse-transformation.
 """
 
 import os
@@ -11,8 +12,10 @@ import pandas as pd
 import argparse
 import logging
 import sys
+import pickle
 from tqdm import tqdm
 from pathlib import Path
+from sklearn.preprocessing import MinMaxScaler
 
 # Add the src directory to the path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -37,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 def parse_args():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description='Evaluate the GL-Fusion model.')
+    parser = argparse.ArgumentParser(description='Evaluate the GL-Fusion model with coordinate scaling.')
     parser.add_argument('--config', type=str, default='config/model_config.yaml',
                        help='Path to the configuration file')
     parser.add_argument('--task', type=int, default=1, choices=[1, 2],
@@ -60,51 +63,64 @@ def load_config(config_path):
     return config
 
 
-def load_model(checkpoint_path, config, device):
-    """
-    Load the model from checkpoint.
+def load_coordinate_scalers(config):
+    """Load the coordinate scalers for inverse transformation."""
+    processed_dir = Path(config['data']['processed_dir'])
+    x_scaler_path = processed_dir / 'x_coordinate_scaler.pkl'
+    y_scaler_path = processed_dir / 'y_coordinate_scaler.pkl'
     
-    Args:
-        checkpoint_path (str): Path to the checkpoint file.
-        config (dict): Configuration dictionary.
-        device (str): Device to load the model onto.
-        
-    Returns:
-        GLFusionModel: The loaded model.
+    try:
+        logger.info(f"Loading coordinate scalers: X from {x_scaler_path}, Y from {y_scaler_path}")
+        with open(x_scaler_path, 'rb') as f:
+            x_scaler = pickle.load(f)
+        with open(y_scaler_path, 'rb') as f:
+            y_scaler = pickle.load(f)
+        logger.info("Coordinate scalers loaded successfully.")
+        return x_scaler, y_scaler
+    except FileNotFoundError:
+        logger.error(f"Coordinate scaler files not found in {processed_dir}. Cannot inverse-transform predictions.")
+        logger.error("Make sure preprocessing has been run with the updated preprocess.py that saves scalers.")
+        raise FileNotFoundError("Required coordinate scaler files not found.")
+    except Exception as e:
+        logger.error(f"Error loading coordinate scalers: {e}")
+        raise
+
+
+def load_model_with_scaling_support(checkpoint_path, config, device):
     """
-    # Initialize model
+    Load the model from checkpoint with support for tokenizer size mismatch.
+    """
+    logger.info(f"Loading model from checkpoint: {checkpoint_path}")
     model = GLFusionModel(config)
     
     # Load checkpoint
-    # Explicitly set weights_only=False as per PyTorch 2.6+ changes
-    # if the checkpoint contains more than just weights (e.g., pickled objects)
     logger.info(f"Loading checkpoint from {checkpoint_path} with weights_only=False")
     try:
-        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    except _pickle.UnpicklingError as e:
-        logger.error(f"Failed to load checkpoint due to UnpicklingError: {e}")
-        logger.error("This might be due to a mismatch in PyTorch versions or a corrupted file.")
-        logger.error("If the error mentions 'Unsupported global', it means the checkpoint contains")
-        logger.error("Python objects not allowed by default with weights_only=True (default in PyTorch 2.6+).")
-        logger.error("Setting weights_only=False is a common workaround for trusted checkpoints.")
-        raise
+        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     except Exception as e:
-        logger.error(f"An unexpected error occurred while loading the checkpoint: {e}")
+        logger.error(f"Failed to load checkpoint: {e}")
         raise
-        
-    # Check if the checkpoint is a dictionary and contains 'model_state_dict'
-    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'])
-        if 'optimizer_state_dict' in checkpoint:
-            logger.info("Optimizer state found in checkpoint.")
-        if 'epoch' in checkpoint:
-            logger.info(f"Checkpoint saved at epoch: {checkpoint['epoch']}")
-    elif hasattr(checkpoint, 'state_dict'): # if it's a model object itself
-        logger.warning("Checkpoint appears to be a full model object, not a state_dict. Loading its state_dict.")
-        model.load_state_dict(checkpoint.state_dict())
-    else: # If it's just a state_dict
-        logger.info("Checkpoint appears to be a model state_dict directly.")
-        model.load_state_dict(checkpoint)
+    
+    # Handle tokenizer size mismatch
+    current_vocab_size = model.llm.model.get_input_embeddings().weight.shape[0]
+    checkpoint_vocab_size = checkpoint['model_state_dict']['llm.model.base_model.model.model.embed_tokens.weight'].shape[0]
+    
+    logger.info(f"Current model vocab size: {current_vocab_size}")
+    logger.info(f"Checkpoint vocab size: {checkpoint_vocab_size}")
+    
+    if current_vocab_size != checkpoint_vocab_size:
+        logger.info(f"Tokenizer size mismatch detected. Resizing model to match checkpoint...")
+        model.llm.model.resize_token_embeddings(checkpoint_vocab_size)
+        logger.info(f"Model resized to {checkpoint_vocab_size} tokens")
+    
+    # Load state dict
+    try:
+        model.load_state_dict(checkpoint['model_state_dict'], strict=True)
+        logger.info("Checkpoint loaded successfully")
+    except Exception as e:
+        logger.warning(f"Failed to load with strict=True, trying strict=False: {e}")
+        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        logger.info("Checkpoint loaded with strict=False")
     
     model.to(device)
     model.eval()
@@ -158,36 +174,32 @@ def load_test_data(config, task_id, split='val'):
     return test_sequences, task_df, indices, node_mapping
 
 
-def evaluate_validation_set(model, test_sequences, task_df, indices, node_mapping, device):
-    """
-    Evaluate the model on the validation set.
+def inverse_transform_predictions(predictions, x_scaler, y_scaler):
+    """Inverse transform scaled predictions back to original coordinate space."""
+    pred_x_scaled = predictions[0].reshape(-1, 1)
+    pred_y_scaled = predictions[1].reshape(-1, 1)
     
-    Args:
-        model (GLFusionModel): Model to evaluate.
-        test_sequences (dict): Test node sequences.
-        task_df (pd.DataFrame): Task data.
-        indices (list): Indices of the validation set.
-        node_mapping (dict): Node mapping dictionary.
-        device (str): Device to evaluate on.
-        
-    Returns:
-        tuple: (metrics, predictions_df)
+    pred_x_original = x_scaler.inverse_transform(pred_x_scaled)
+    pred_y_original = y_scaler.inverse_transform(pred_y_scaled)
+    
+    return np.array([pred_x_original[0,0], pred_y_original[0,0]])
+
+
+def evaluate_validation_set(model, test_sequences, task_df, indices, node_mapping, device, x_scaler, y_scaler):
     """
-    # For validation, we already have the ground truth
+    Evaluate the model on the validation set with proper coordinate scaling.
+    """
     all_predictions = []
     all_targets = []
-    
-    # Track user, day, time, predicted and actual coordinates
     prediction_records = []
-    
-    # Lists to store per-user GeoBLEU and DTW scores
     user_geobleu_scores = []
     user_dtw_scores = []
     
     # Get unique users in the validation set
     val_users = set(task_df.iloc[indices]['uid'].values)
-    
-    for uid in tqdm(val_users, desc="Evaluating validation set"):
+    logger.info(f"Evaluating on all {len(val_users)} users in the validation set.")
+
+    for uid in tqdm(val_users, desc='Evaluating validation set'):
         if uid not in test_sequences:
             continue
         
@@ -201,26 +213,22 @@ def evaluate_validation_set(model, test_sequences, task_df, indices, node_mappin
         if len(user_df) < 2:
             continue
         
-        # For each day/time point, predict the next location
         # Collect predicted and target trajectories for the current user
         user_predicted_trajectory = []
         user_target_trajectory = []
 
         for i in range(len(user_df) - 1):
-            # Get the current location's info
+            # Get the current and target location info
             current_row = user_df.iloc[i]
             current_d = current_row['d']
             current_t = current_row['t']
             
-            # Get the target location's info
             target_row = user_df.iloc[i + 1]
             target_d = target_row['d']
             target_t = target_row['t']
             target_coords = np.array([target_row['x'], target_row['y']])
             
             # Extract the sequence up to the current point
-            # This is simplified; in practice, we'd need to match the exact sequence
-            # based on day and time, but for demonstration we'll just use a fixed length
             seq_len = 24  # Use the last 24 locations
             if i >= seq_len:
                 input_seq = node_seq[i - seq_len + 1:i + 1]
@@ -235,21 +243,27 @@ def evaluate_validation_set(model, test_sequences, task_df, indices, node_mappin
             
             # Forward pass
             with torch.no_grad():
-                predictions = model(
+                predictions_dict = model(
                     input_ids=input_tensor,
                     attention_mask=attention_mask,
                     node_sequence_mapping=node_seq_mapping
                 )
             
-            # Convert prediction to numpy
-            pred_coords = predictions.cpu().numpy()[0]
+            # Extract predictions from dictionary (handle GLFusionModel output format)
+            if isinstance(predictions_dict, dict) and 'predictions' in predictions_dict:
+                predictions_tensor = predictions_dict['predictions']
+            else:
+                predictions_tensor = predictions_dict
+            
+            # Convert prediction to numpy and inverse-transform
+            pred_coords_scaled = predictions_tensor.cpu().numpy()[0]
+            pred_coords = inverse_transform_predictions(pred_coords_scaled, x_scaler, y_scaler)
             
             # Store predictions and targets
             all_predictions.append(pred_coords)
             all_targets.append(target_coords)
             
             # Append to user-specific trajectories for GeoBLEU/DTW
-            # Format for geobleu: (d, t, x, y)
             user_predicted_trajectory.append((target_d, target_t, pred_coords[0], pred_coords[1]))
             user_target_trajectory.append((target_d, target_t, target_coords[0], target_coords[1]))
             
@@ -266,20 +280,17 @@ def evaluate_validation_set(model, test_sequences, task_df, indices, node_mappin
                 'target_y': target_coords[1]
             })
         
-        # Calculate GeoBLEU and DTW for the current user if trajectories are not empty
+        # Calculate GeoBLEU and DTW for the current user
         if user_predicted_trajectory and user_target_trajectory:
             try:
-                # Ensure trajectories are long enough for default n-grams (min length 3 for n=3)
-                if len(user_predicted_trajectory) >= 1 and len(user_target_trajectory) >=1: # geobleu internal check handles n-gram length
+                if len(user_predicted_trajectory) >= 1 and len(user_target_trajectory) >= 1:
                     gb_score = geobleu.calc_geobleu_single(user_predicted_trajectory, user_target_trajectory)
                     user_geobleu_scores.append(gb_score)
-                else:
-                    logger.debug(f"Skipping GeoBLEU for UID {uid} due to short trajectory (pred: {len(user_predicted_trajectory)}, target: {len(user_target_trajectory)})")
 
                 dtw_score = geobleu.calc_dtw_single(user_predicted_trajectory, user_target_trajectory)
                 user_dtw_scores.append(dtw_score)
             except Exception as e:
-                logger.warning(f"Could not calculate GeoBLEU/DTW for UID {uid}. Trajectories: Pred={len(user_predicted_trajectory)}, Target={len(user_target_trajectory)}. Error: {e}")
+                logger.warning(f'Could not calculate GeoBLEU/DTW for UID {uid}. Error: {e}')
 
     # Calculate metrics
     all_predictions_np = np.array(all_predictions)
@@ -293,12 +304,12 @@ def evaluate_validation_set(model, test_sequences, task_df, indices, node_mappin
     if user_geobleu_scores:
         metrics['geo_bleu'] = np.mean(user_geobleu_scores)
     else:
-        metrics['geo_bleu'] = float('nan') # Or 0.0, depending on desired behavior for no valid scores
+        metrics['geo_bleu'] = float('nan')
         
     if user_dtw_scores:
         metrics['dtw'] = np.mean(user_dtw_scores)
     else:
-        metrics['dtw'] = float('nan') # Or appropriate value
+        metrics['dtw'] = float('nan')
 
     # Create predictions dataframe
     predictions_df = pd.DataFrame(prediction_records)
@@ -322,7 +333,7 @@ def main():
     log_dir = config['logging']['log_dir']
     os.makedirs(log_dir, exist_ok=True)
     
-    log_file = os.path.join(log_dir, f'evaluation_log_task{args.task}_{args.split}.txt')
+    log_file = os.path.join(log_dir, f'evaluation_with_scaling_log_task{args.task}_{args.split}.txt')
     file_handler = logging.FileHandler(log_file)
     file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
     logger.addHandler(file_handler)
@@ -331,8 +342,11 @@ def main():
     logger.info(f"Using device: {args.device}")
     logger.info(f"Loading model from checkpoint: {args.checkpoint}")
     
+    # Load coordinate scalers
+    x_scaler, y_scaler = load_coordinate_scalers(config)
+    
     # Load model
-    model = load_model(args.checkpoint, config, args.device)
+    model = load_model_with_scaling_support(args.checkpoint, config, args.device)
     
     # Load test data
     test_sequences, task_df, indices, node_mapping = load_test_data(config, args.task, args.split)
@@ -340,7 +354,7 @@ def main():
     # Evaluate on appropriate split
     if args.split == 'val':
         metrics, predictions_df = evaluate_validation_set(
-            model, test_sequences, task_df, indices, node_mapping, args.device
+            model, test_sequences, task_df, indices, node_mapping, args.device, x_scaler, y_scaler
         )
         
         # Log metrics
@@ -364,9 +378,7 @@ def main():
             logger.info(f"Saved metrics to {metrics_path}")
             logger.info(f"Saved predictions to {predictions_path}")
     else:
-        # For test set, we would need to generate submission files
-        # This is currently not implemented in this basic version
-        logger.warning("Test set evaluation not implemented in this script. Use generate_submission.py instead.")
+        logger.warning("Test set evaluation not implemented in this version.")
     
     logger.info("Evaluation completed!")
 
