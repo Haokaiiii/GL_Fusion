@@ -10,6 +10,7 @@ import torch.nn as nn
 import torch.optim as optim
 from transformers import get_linear_schedule_with_warmup, AutoTokenizer
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from src.config.token_config import TokenConfig
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ class ModelFactory:
         
         # Resize embeddings if needed
         tokenizer = ModelFactory._get_tokenizer(config)
-        special_tokens_dict = {'additional_special_tokens': ['<graph_start>', '<graph_end>', '<node>']}
+        special_tokens_dict = {'additional_special_tokens': TokenConfig.get_all_special_tokens()}
         num_added_toks = tokenizer.add_special_tokens(special_tokens_dict)
         
         if num_added_toks > 0 and hasattr(model, 'llm') and hasattr(model.llm, 'model'):

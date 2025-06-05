@@ -22,6 +22,7 @@ import torch.distributed as dist
 from sklearn.preprocessing import MinMaxScaler # Added
 import _pickle
 from src.config.token_config import TokenConfig
+import warnings
 
 # Get logger instance
 logger = logging.getLogger(__name__)
@@ -541,8 +542,10 @@ class TrajectoryDataset(Dataset):
         target_coords_array = self.user_coord_data[uid][target_index]
         
         # --- (NEW) Create the time-aware input sequence for the LLM ---
+        # Use modulo 24 to wrap time into hours of the day
+        hour_of_day = target_t % 24
         day_token_id = self.day_token_ids.get(target_d)
-        time_token_id = self.time_token_ids.get(target_t)
+        time_token_id = self.time_token_ids.get(hour_of_day)
 
         if day_token_id is None or time_token_id is None:
             logger.warning(f"Invalid day ({target_d}) or time ({target_t}) for sample. Skipping time tokens.")
@@ -559,8 +562,10 @@ class TrajectoryDataset(Dataset):
         attention_mask = torch.ones_like(llm_input_ids_tensor)
         
         # --- (NEW) Scale Target Coordinates ---
-        scaled_x = self.x_scaler.transform(target_coords_array[0].reshape(-1, 1))
-        scaled_y = self.y_scaler.transform(target_coords_array[1].reshape(-1, 1))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            scaled_x = self.x_scaler.transform(target_coords_array[0].reshape(-1, 1))
+            scaled_y = self.y_scaler.transform(target_coords_array[1].reshape(-1, 1))
         target_coords_scaled = torch.tensor([scaled_x[0,0], scaled_y[0,0]], dtype=torch.float)
 
         # The node_sequence_mapping should contain the node_id for tokens that are nodes, and -1 otherwise.

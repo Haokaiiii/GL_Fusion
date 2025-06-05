@@ -255,8 +255,9 @@ def evaluate_validation_set(model, test_sequences, task_df, indices, node_mappin
             target_coords = np.array([target_row['x'], target_row['y']])
             
             # --- Create the time-aware input ---
+            hour_of_day = target_t % 24 # Use modulo 24
             day_token = day_token_ids.get(target_d)
-            time_token = time_token_ids.get(target_t)
+            time_token = time_token_ids.get(hour_of_day)
 
             if day_token is None or time_token is None:
                 logger.warning(f"UID {uid}: Could not find time tokens for d={target_d}, t={target_t}. Skipping prediction.")
