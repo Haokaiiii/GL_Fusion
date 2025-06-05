@@ -259,7 +259,7 @@ def calc_geobleu_single(sys_seq, ans_seq):
         geobleu_val = calc_geobleu_orig(
             sys_dict_by_day[d],
             ans_dict_by_day[d],
-            max_n=3,
+            max_n=5,
             beta=0.5,
             weights=None)
         geobleu_val_list.append(geobleu_val)

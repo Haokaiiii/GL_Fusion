@@ -199,8 +199,18 @@ def evaluate_validation_set(model, test_sequences, task_df, indices, node_mappin
     user_dtw_scores = []
     
     # Get unique users in the validation set
-    val_users = set(task_df.iloc[indices]['uid'].values)
-    logger.info(f"Evaluating on all {len(val_users)} users in the validation set.")
+    all_val_users = set(task_df.iloc[indices]['uid'].values)
+
+    # Apply fast evaluation limits from environment variables for faster dev runs
+    max_val_users = int(os.environ.get('MAX_VAL_USERS', '0'))
+    if max_val_users > 0 and len(all_val_users) > max_val_users:
+        import random
+        random.seed(42)  # for reproducibility
+        val_users = set(random.sample(list(all_val_users), max_val_users))
+        logger.info(f'Fast evaluation: Limited to {max_val_users} users out of {len(all_val_users)} total')
+    else:
+        val_users = all_val_users
+        logger.info(f"Evaluating on all {len(val_users)} users in the validation set.")
 
     for uid in tqdm(val_users, desc='Evaluating validation set'):
         if uid not in test_sequences:
