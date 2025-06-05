@@ -76,8 +76,35 @@ def load_model(checkpoint_path, config, device):
     model = GLFusionModel(config)
     
     # Load checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    # Explicitly set weights_only=False as per PyTorch 2.6+ changes
+    # if the checkpoint contains more than just weights (e.g., pickled objects)
+    logger.info(f"Loading checkpoint from {checkpoint_path} with weights_only=False")
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    except _pickle.UnpicklingError as e:
+        logger.error(f"Failed to load checkpoint due to UnpicklingError: {e}")
+        logger.error("This might be due to a mismatch in PyTorch versions or a corrupted file.")
+        logger.error("If the error mentions 'Unsupported global', it means the checkpoint contains")
+        logger.error("Python objects not allowed by default with weights_only=True (default in PyTorch 2.6+).")
+        logger.error("Setting weights_only=False is a common workaround for trusted checkpoints.")
+        raise
+    except Exception as e:
+        logger.error(f"An unexpected error occurred while loading the checkpoint: {e}")
+        raise
+        
+    # Check if the checkpoint is a dictionary and contains 'model_state_dict'
+    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        model.load_state_dict(checkpoint['model_state_dict'])
+        if 'optimizer_state_dict' in checkpoint:
+            logger.info("Optimizer state found in checkpoint.")
+        if 'epoch' in checkpoint:
+            logger.info(f"Checkpoint saved at epoch: {checkpoint['epoch']}")
+    elif hasattr(checkpoint, 'state_dict'): # if it's a model object itself
+        logger.warning("Checkpoint appears to be a full model object, not a state_dict. Loading its state_dict.")
+        model.load_state_dict(checkpoint.state_dict())
+    else: # If it's just a state_dict
+        logger.info("Checkpoint appears to be a model state_dict directly.")
+        model.load_state_dict(checkpoint)
     
     model.to(device)
     model.eval()
