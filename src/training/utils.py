@@ -19,6 +19,7 @@ import gc
 import datetime
 from pathlib import Path
 import torch.distributed as dist
+from sklearn.preprocessing import MinMaxScaler # Added
 
 # Get logger instance
 logger = logging.getLogger(__name__)
@@ -90,6 +91,33 @@ class TrajectoryDataset(Dataset):
         if self.pad_token_id is None:
              self.pad_token_id = self.tokenizer.eos_token_id # Use EOS if PAD is not set
              logger.warning(f"Tokenizer has no PAD token, using EOS token ({self.pad_token_id}) for padding.")
+
+        # --- (NEW) Load Coordinate Scalers ---
+        data_conf = config['data']
+        processed_dir = Path(data_conf.get('processed_dir', 'data/processed')) # Use a default if not in config
+        x_scaler_path = processed_dir / 'x_coordinate_scaler.pkl'
+        y_scaler_path = processed_dir / 'y_coordinate_scaler.pkl'
+
+        try:
+            if is_main_process: logger.info(f"Loading coordinate scalers: X from {x_scaler_path}, Y from {y_scaler_path}")
+            with open(x_scaler_path, 'rb') as f:
+                self.x_scaler = pickle.load(f)
+            with open(y_scaler_path, 'rb') as f:
+                self.y_scaler = pickle.load(f)
+            if is_main_process: logger.info("Coordinate scalers loaded successfully.")
+        except FileNotFoundError:
+            logger.error(f"Coordinate scaler files not found in {processed_dir}. Ensure preprocess.py has been run and saved them.")
+            # Fallback: create dummy scalers that do nothing if files are not found
+            # This allows dataset creation to proceed but will result in unscaled (likely poor) training.
+            logger.warning("Using dummy identity scalers as scaler files were not found. Coordinates will NOT be scaled.")
+            self.x_scaler = MinMaxScaler() # Dummy scaler
+            self.x_scaler.fit(np.array([[0],[1]])) # Fit with dummy range to avoid errors if transform is called
+            self.y_scaler = MinMaxScaler() # Dummy scaler
+            self.y_scaler.fit(np.array([[0],[1]]))
+        except Exception as e:
+            logger.error(f"Error loading coordinate scalers: {e}", exc_info=True)
+            raise RuntimeError(f"Failed to load coordinate scalers: {e}")
+        # --- End (NEW) Load Coordinate Scalers ---
 
         # Determine max sequence lengths
         self.max_llm_seq_length = config['llm'].get('sequence_length', 512) 
@@ -543,6 +571,14 @@ class TrajectoryDataset(Dataset):
         target_coords_array = self.user_coord_data[uid][target_coord_index]
         target_coords = torch.tensor(target_coords_array, dtype=torch.float)
         
+        # --- (NEW) Scale Target Coordinates ---
+        # Scalers expect shape (n_samples, n_features), so reshape
+        scaled_x = self.x_scaler.transform(target_coords_array[0].reshape(-1, 1))
+        scaled_y = self.y_scaler.transform(target_coords_array[1].reshape(-1, 1))
+        # Reconstruct the scaled target_coords tensor
+        target_coords_scaled = torch.tensor([scaled_x[0,0], scaled_y[0,0]], dtype=torch.float)
+        # --- End (NEW) Scale Target Coordinates ---
+        
         # --- Get subgraph edge index --- 
         # Find edges where both source and target are in unique_nodes_in_segment
         # This requires mapping unique_nodes_in_segment back to their original IDs if necessary
@@ -591,7 +627,7 @@ class TrajectoryDataset(Dataset):
             'node_text_attention_mask': node_text_attention_mask, # Added
             'subgraph_edge_index': subgraph_edge_index, # Added for structure-aware layer
             'llm_aligned_node_mapping': llm_aligned_node_mapping, # NEW: Mapping aligned with LLM sequence
-            'target_coords': target_coords,
+            'target_coords': target_coords_scaled, # USE SCALED TARGETS
             'pad_token_id': self.pad_token_id # Pass pad token id for collate fn
         }
 

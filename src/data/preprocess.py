@@ -15,6 +15,7 @@ from pathlib import Path
 import logging
 from tqdm import tqdm
 import math # Added for ceil
+from sklearn.preprocessing import MinMaxScaler # Added for coordinate scaling
 
 # Set up logging
 logging.basicConfig(
@@ -454,6 +455,48 @@ def main():
     task1_splits, task2_splits = define_data_splits(task1_df, task2_df, config)
     task1_trajectories, task2_trajectories = form_trajectories(task1_df, task2_df, task1_splits, task2_splits)
     node_mapping, node_features = create_node_features(task1_df, task2_df, cell_poi_df, poi_categories_df, config)
+    
+    # --- (NEW) Scale Coordinates and Save Scalers ---
+    logger.info("Scaling coordinates...")
+    processed_dir = config['data']['processed_dir']
+
+    # Combine training data from both tasks to fit scalers
+    # It's important to fit scalers ONLY on training data to prevent data leakage
+    task1_train_df = task1_df.iloc[task1_splits['train']]
+    task2_train_df = task2_df.iloc[task2_splits['train']]
+    combined_train_df = pd.concat([task1_train_df[['x', 'y']], task2_train_df[['x', 'y']]], ignore_index=True)
+
+    x_scaler = MinMaxScaler()
+    y_scaler = MinMaxScaler()
+
+    # Fit scalers on the combined training data
+    combined_train_df['x_scaled'] = x_scaler.fit_transform(combined_train_df[['x']])
+    combined_train_df['y_scaled'] = y_scaler.fit_transform(combined_train_df[['y']])
+    
+    # Save the fitted scalers
+    x_scaler_path = os.path.join(processed_dir, 'x_coordinate_scaler.pkl')
+    y_scaler_path = os.path.join(processed_dir, 'y_coordinate_scaler.pkl')
+    with open(x_scaler_path, 'wb') as f:
+        pickle.dump(x_scaler, f)
+    with open(y_scaler_path, 'wb') as f:
+        pickle.dump(y_scaler, f)
+    logger.info(f"Saved X-coordinate scaler to {x_scaler_path}")
+    logger.info(f"Saved Y-coordinate scaler to {y_scaler_path}")
+
+    # --- Apply scaling to the original full dataframes ---
+    # We need to do this carefully to ensure node_mapping uses original coordinates
+    # but trajectories and target coordinates for model use scaled versions.
+    # This part will require modification of how trajectories are formed and used.
+    # For now, we save the scalers. The next step will be to integrate their use.
+    # It might be better to scale coordinates *within* the TrajectoryDataset or a similar
+    # data loading utility specifically when preparing batches for the model,
+    # rather than globally altering the dataframes if node_mapping relies on original coords.
+
+    # For now, we'll just log that scalers are ready.
+    # Actual transformation of task1_df, task2_df for training/eval targets
+    # will need to be handled in the data loading/batching part of the training/eval pipeline.
+    logger.info("Coordinate scalers are now ready. Subsequent steps need to use these to scale targets for training and inverse_scale predictions for evaluation.")
+    # --- End (NEW) Scale Coordinates ---
     
     # Generate and save node text descriptions (NEW STEP)
     generate_node_text_features(node_mapping, cell_poi_df, poi_categories_df, config)
