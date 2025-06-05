@@ -1,80 +1,94 @@
-# Python
+# Python Byte-compiled / Optimized / DLL files
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
 *.so
-*.egg-info/
-dist/
-build/
-*.egg
 
-# Virtual environments
+# Distribution / Packaging
+build/
+dist/
+*.egg-info/
+*.egg
+wheels/
+*.whl
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Python Virtual Environments
 venv/
 env/
 .env/
 .venv/
 ENV/
+# requirements.txt # Typically committed, but add here if you specifically want to ignore it.
+# conda.txt # Add here if you specifically want to ignore it.
 
-# IDE and editor specific files
+# IDE and Editor Specific Files
 .vscode/
 .idea/
+*.project       # Generic project file
+*.pydevproject  # PyDev
 *.sublime-project
 *.sublime-workspace
-.cursor/
+.DS_Store       # macOS
+.directory      # Linux
+Thumbs.db       # Windows
+.history        # VSCode Local History extension
+nbproject/      # NetBeans
+.cursorignore
 
-# Data files and directories
+# Cursor-specific (cache/state directory)
+.cursor/
+# .cursorignore # This file itself is usually committed if it's a config for Cursor editor.
+                # If it's some other generated file/directory, then it's fine to ignore.
+
+# Jupyter Notebook Checkpoints
+.ipynb_checkpoints/
+
+# Temporary Files
+*.tmp
+*.swp
+*~
+*.bak
+*.patch
+*.diff
+
+# Log Files
+*.log
+logs/    # If you have a dedicated logs directory
+
+# Runtime Data and Caches
+*.sqlite3
+*.db      # Generic database file, be careful if you use .db for other purposes
+
+# Project-Specific Data Files & Directories
+# These should contain large raw/processed data not suitable for Git.
+# Consider using Git LFS for large files you need to version control.
 data/raw/
 data/processed/
 data/prepared_for_llm/
 archive/
-.cursor/
 ss/
 project_plan/
 
-# If you have large data files not tracked by git-lfs, add them here
-# e.g. data/some_large_dataset/
-
-# Results, logs, and checkpoints
+# Results and Local Checkpoints (Project-Specific)
+# Typically, results and large model checkpoints are not committed.
 results/
 checkpoints/
-*.log
-# PBS job output files
-*.e[0-9]*
+
+# PBS Job Output Files (NCI Gadi Specific)
 *.o[0-9]*
+*.e[0-9]*
 
-# Archives
-archive/
+# PBS Submission Scripts
+# *.pbs # PBS submission scripts are usually committed. Add this line if you specifically want to ignore all of them.
 
-# Conda environment files (if created for local dev)
-# conda-env.yml
-# environment.yml
-# conda.txt
+# Conda environment definition files
+# conda-env.yml     # Usually committed to define the environment for others.
+# environment.yml # Usually committed to define the environment for others.
 
-# Specific project files and directories
-# Add any other generated or temporary files specific to your project
-geobleu-2023/geobleu.egg-info/
-ss/
-# CLEANUP_COMPLETED.md # Uncomment if you want to ignore this
-# MODEL_CLEANUP_SUMMARY.md # Uncomment if you want to ignore this
-# MODULAR_REFACTORING_SUMMARY.md # Uncomment if you want to ignore this
-# PROJECT_STATUS.md # Uncomment if you want to ignore this
-# QUICKSTART_GADI.md # Uncomment if you want to ignore this
-# TRAINING_SCRIPTS_README.md # Uncomment if you want to ignore this
-# WORKSPACE_OPTIMIZATION.md # Uncomment if you want to ignore this
-
-# Notebook checkpoints
-.ipynb_checkpoints/
-
-# Temporary files
-*.tmp
-*.swp
-*~
-
-# DS_Store (macOS)
-.DS_Store 
-
-.cursorignore
-conda.txt
+# If you want to ignore ALL .txt files (generally not recommended, be specific)
 *.txt
 *.pbs
+
+
+
