@@ -1,0 +1,80 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+env/
+.env/
+.venv/
+ENV/
+
+# IDE and editor specific files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+.cursor/
+
+# Data files and directories
+data/raw/
+data/processed/
+data/prepared_for_llm/
+archive/
+.cursor/
+ss/
+project_plan/
+
+# If you have large data files not tracked by git-lfs, add them here
+# e.g. data/some_large_dataset/
+
+# Results, logs, and checkpoints
+results/
+checkpoints/
+*.log
+# PBS job output files
+*.e[0-9]*
+*.o[0-9]*
+
+# Archives
+archive/
+
+# Conda environment files (if created for local dev)
+# conda-env.yml
+# environment.yml
+# conda.txt
+
+# Specific project files and directories
+# Add any other generated or temporary files specific to your project
+geobleu-2023/geobleu.egg-info/
+ss/
+# CLEANUP_COMPLETED.md # Uncomment if you want to ignore this
+# MODEL_CLEANUP_SUMMARY.md # Uncomment if you want to ignore this
+# MODULAR_REFACTORING_SUMMARY.md # Uncomment if you want to ignore this
+# PROJECT_STATUS.md # Uncomment if you want to ignore this
+# QUICKSTART_GADI.md # Uncomment if you want to ignore this
+# TRAINING_SCRIPTS_README.md # Uncomment if you want to ignore this
+# WORKSPACE_OPTIMIZATION.md # Uncomment if you want to ignore this
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Temporary files
+*.tmp
+*.swp
+*~
+
+# DS_Store (macOS)
+.DS_Store 
+
+.cursorignore
+conda.txt
+*.txt
+*.pbs
