@@ -21,6 +21,7 @@ from pathlib import Path
 import torch.distributed as dist
 from sklearn.preprocessing import MinMaxScaler # Added
 import _pickle
+from src.config.token_config import TokenConfig
 
 # Get logger instance
 logger = logging.getLogger(__name__)
@@ -82,12 +83,15 @@ class TrajectoryDataset(Dataset):
         # Load tokenizer and add special tokens
         if is_main_process: logger.info(f"Loading tokenizer for dataset from {tokenizer_path}")
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-        special_tokens_dict = {'additional_special_tokens': ['<graph_start>', '<graph_end>', '<node>']}
+        special_tokens = TokenConfig.get_all_special_tokens()
+        special_tokens_dict = {'additional_special_tokens': special_tokens}
         num_added_toks = self.tokenizer.add_special_tokens(special_tokens_dict)
         if is_main_process: logger.info(f"Added {num_added_toks} special tokens to tokenizer.")
-        self.graph_start_token_id = self.tokenizer.convert_tokens_to_ids('<graph_start>')
-        self.graph_end_token_id = self.tokenizer.convert_tokens_to_ids('<graph_end>')
-        self.node_token_id = self.tokenizer.convert_tokens_to_ids('<node>')
+
+        # Get IDs for tokens we'll need frequently
+        self.day_token_ids = {i: self.tokenizer.convert_tokens_to_ids(TokenConfig.get_day_token(i)) for i in range(TokenConfig.MAX_DAYS)}
+        self.time_token_ids = {i: self.tokenizer.convert_tokens_to_ids(TokenConfig.get_time_token(i)) for i in range(TokenConfig.MAX_HOURS)}
+        
         self.pad_token_id = self.tokenizer.pad_token_id
         if self.pad_token_id is None:
              self.pad_token_id = self.tokenizer.eos_token_id # Use EOS if PAD is not set
@@ -359,16 +363,17 @@ class TrajectoryDataset(Dataset):
                             user_node_seq = self.node_sequences[uid]
                             user_coords = self.user_coord_data.get(uid)
                             if user_coords is None: continue
-                            max_target_node_index = len(user_node_seq) - 1
-                            max_coord_index = len(user_coords) - 1
+                            
+                            # The sequence now contains (node_id, d, t) tuples
                             num_possible_samples = len(user_node_seq) - (self.sequence_length + self.prediction_horizon) + 1
                             
                             # Further optimize by only taking every nth sample if we have too many
                             stride = max(1, num_possible_samples // 1000) if num_possible_samples > 2000 else 1
                             
                             for i in range(0, num_possible_samples, stride):
+                                # The target is the point at sequence_length + prediction_horizon
                                 target_node_index = i + self.sequence_length + self.prediction_horizon - 1
-                                if target_node_index <= max_target_node_index and target_node_index <= max_coord_index:
+                                if target_node_index < len(user_node_seq) and target_node_index < len(user_coords):
                                     chunk_identifiers.append((uid, i))
                         
                         return chunk_identifiers
@@ -397,8 +402,7 @@ class TrajectoryDataset(Dataset):
                             user_node_seq = self.node_sequences[uid]
                             user_coords = self.user_coord_data.get(uid)
                             if user_coords is None: continue
-                            max_target_node_index = len(user_node_seq) - 1
-                            max_coord_index = len(user_coords) - 1
+                            
                             num_possible_samples = len(user_node_seq) - (self.sequence_length + self.prediction_horizon) + 1
                             
                             # Further optimize by only taking every nth sample if we have too many
@@ -406,7 +410,7 @@ class TrajectoryDataset(Dataset):
                             
                             for i in range(0, num_possible_samples, stride):
                                 target_node_index = i + self.sequence_length + self.prediction_horizon - 1
-                                if target_node_index <= max_target_node_index and target_node_index <= max_coord_index:
+                                if target_node_index < len(user_node_seq) and target_node_index < len(user_coords):
                                     chunk_identifiers.append((uid, i))
                         
                         full_sample_identifiers.extend(chunk_identifiers)
@@ -426,8 +430,7 @@ class TrajectoryDataset(Dataset):
                         user_node_seq = self.node_sequences[uid]
                         user_coords = self.user_coord_data.get(uid)
                         if user_coords is None: continue
-                        max_target_node_index = len(user_node_seq) - 1
-                        max_coord_index = len(user_coords) - 1
+                        
                         num_possible_samples = len(user_node_seq) - (self.sequence_length + self.prediction_horizon) + 1
                         
                         # Further optimize by only taking every 5th sample if we have a lot
@@ -435,7 +438,7 @@ class TrajectoryDataset(Dataset):
                         
                         for i in range(0, num_possible_samples, stride):
                             target_node_index = i + self.sequence_length + self.prediction_horizon - 1
-                            if target_node_index <= max_target_node_index and target_node_index <= max_coord_index:
+                            if target_node_index < len(user_node_seq) and target_node_index < len(user_coords):
                                 chunk_identifiers.append((uid, i))
                     
                     full_sample_identifiers.extend(chunk_identifiers)
@@ -447,12 +450,11 @@ class TrajectoryDataset(Dataset):
                 user_node_seq = self.node_sequences[uid]
                 user_coords = self.user_coord_data.get(uid)
                 if user_coords is None: continue
-                max_target_node_index = len(user_node_seq) - 1
-                max_coord_index = len(user_coords) - 1
+                
                 num_possible_samples = len(user_node_seq) - (self.sequence_length + self.prediction_horizon) + 1
                 for i in range(num_possible_samples):
                     target_node_index = i + self.sequence_length + self.prediction_horizon - 1
-                    if target_node_index <= max_target_node_index and target_node_index <= max_coord_index:
+                    if target_node_index < len(user_node_seq) and target_node_index < len(user_coords):
                         full_sample_identifiers.append((uid, i))
                       
         total_samples = len(full_sample_identifiers)
@@ -520,243 +522,97 @@ class TrajectoryDataset(Dataset):
     
     def __getitem__(self, idx):
         uid, start_index = self.sample_identifiers[idx]
-        user_node_seq = self.node_sequences[uid]
         
-        # Extract the original trajectory node sequence segment
-        trajectory_node_ids = user_node_seq[start_index : start_index + self.sequence_length]
+        # user_full_sequence is now a list of (node_id, d, t) tuples
+        user_full_sequence = self.node_sequences[uid]
         
-        # Get unique nodes relevant to this trajectory segment
-        unique_nodes_in_segment = sorted(list(set(trajectory_node_ids)))
-        num_nodes = len(unique_nodes_in_segment)
+        # Define the history and target points based on sequence_length
+        history_end_index = start_index + self.sequence_length
+        target_index = history_end_index # Predict the very next step
         
-        # Construct the LLM input sequence: [<graph_start>, <node> * num_nodes, <graph_end>]
-        llm_input_ids_list = [
-            self.graph_start_token_id
-        ] + [
-            self.node_token_id
-        ] * num_nodes + [
-            self.graph_end_token_id
-        ]
+        # Extract history sequence of node IDs
+        history_sequence = user_full_sequence[start_index : history_end_index]
+        history_node_ids = [item[0] for item in history_sequence]
         
-        # --- Get and tokenize node text descriptions ---
-        node_texts = [self.node_text_descriptions.get(str(node_id), f"Node {node_id} text missing") 
-                      for node_id in unique_nodes_in_segment]
-        tokenized_node_texts = self.tokenizer(
-            node_texts, 
-            padding='max_length', 
-            truncation=True, 
-            max_length=self.max_node_text_len, 
-            return_tensors="pt"
-        )
-        node_text_input_ids = tokenized_node_texts['input_ids'] # Shape: [num_nodes, max_node_text_len]
-        node_text_attention_mask = tokenized_node_texts['attention_mask'] # Shape: [num_nodes, max_node_text_len]
-        # ---------------------------------------------
+        # Get target information
+        target_node_id, target_d, target_t = user_full_sequence[target_index]
+        
+        # Get target coordinates (unscaled)
+        target_coords_array = self.user_coord_data[uid][target_index]
+        
+        # --- (NEW) Create the time-aware input sequence for the LLM ---
+        day_token_id = self.day_token_ids.get(target_d)
+        time_token_id = self.time_token_ids.get(target_t)
 
-        # Truncate main sequence if exceeding max LLM sequence length
+        if day_token_id is None or time_token_id is None:
+            logger.warning(f"Invalid day ({target_d}) or time ({target_t}) for sample. Skipping time tokens.")
+            llm_input_ids_list = history_node_ids
+        else:
+            llm_input_ids_list = history_node_ids + [day_token_id, time_token_id]
+
+        # Truncate if needed to fit model's max sequence length
         if len(llm_input_ids_list) > self.max_llm_seq_length:
-             max_nodes_allowed = self.max_llm_seq_length - 2
-             llm_input_ids_list = llm_input_ids_list[:1] + llm_input_ids_list[1:1+max_nodes_allowed] + llm_input_ids_list[-1:]
-             num_nodes = max_nodes_allowed # Update node count
-             unique_nodes_in_segment = unique_nodes_in_segment[:num_nodes]
-             # Truncate node text data as well
-             node_text_input_ids = node_text_input_ids[:num_nodes]
-             node_text_attention_mask = node_text_attention_mask[:num_nodes]
-             logger.warning(f"LLM input sequence truncated for sample {idx} to {self.max_llm_seq_length} tokens.")
-             
-        # Convert main sequence to tensor
+            excess = len(llm_input_ids_list) - self.max_llm_seq_length
+            llm_input_ids_list = llm_input_ids_list[excess:]
+            
         llm_input_ids_tensor = torch.tensor(llm_input_ids_list, dtype=torch.long)
         attention_mask = torch.ones_like(llm_input_ids_tensor)
         
-        # Target coordinates
-        target_coord_index = start_index + self.sequence_length + self.prediction_horizon - 1
-        target_coords_array = self.user_coord_data[uid][target_coord_index]
-        target_coords = torch.tensor(target_coords_array, dtype=torch.float)
-        
         # --- (NEW) Scale Target Coordinates ---
-        # Scalers expect shape (n_samples, n_features), so reshape
         scaled_x = self.x_scaler.transform(target_coords_array[0].reshape(-1, 1))
         scaled_y = self.y_scaler.transform(target_coords_array[1].reshape(-1, 1))
-        # Reconstruct the scaled target_coords tensor
         target_coords_scaled = torch.tensor([scaled_x[0,0], scaled_y[0,0]], dtype=torch.float)
-        # --- End (NEW) Scale Target Coordinates ---
-        
-        # --- Get subgraph edge index --- 
-        # Find edges where both source and target are in unique_nodes_in_segment
-        # This requires mapping unique_nodes_in_segment back to their original IDs if necessary
-        # Create a mapping from original node ID to its index within unique_nodes_in_segment
-        node_id_to_local_idx = {node_id: i for i, node_id in enumerate(unique_nodes_in_segment)}
-        
-        subgraph_edge_indices = []
-        node_id_set = set(unique_nodes_in_segment)
-        
-        # Use adjacency list for efficient edge lookup
-        seen_edges = set()  # To avoid duplicate edges
-        for node_id in unique_nodes_in_segment:
-            if node_id in self.adjacency_dict:
-                for neighbor in self.adjacency_dict[node_id]:
-                    if neighbor in node_id_set:
-                        # Create edge tuple (ensure consistent ordering to avoid duplicates)
-                        edge = (min(node_id, neighbor), max(node_id, neighbor))
-                        if edge not in seen_edges:
-                            seen_edges.add(edge)
-                            local_src = node_id_to_local_idx[node_id]
-                            local_dst = node_id_to_local_idx[neighbor]
-                            subgraph_edge_indices.append([local_src, local_dst])
-        
-        subgraph_edge_index = torch.tensor(subgraph_edge_indices, dtype=torch.long).t().contiguous()
-        if subgraph_edge_index.numel() == 0: # Handle case with no edges within the subgraph
-             subgraph_edge_index = torch.empty((2, 0), dtype=torch.long)
-        # ----------------------------- 
 
-        # --- Create LLM-aligned node sequence mapping --- START
-        # Length should match llm_input_ids_tensor BEFORE padding
-        llm_aligned_mapping = [-1] * len(llm_input_ids_tensor) # Initialize with -1 (padding/special token indicator)
-        # Fill in the original node IDs for the <node> token positions
-        for i in range(num_nodes): # num_nodes already reflects potential truncation
-            llm_token_position = 1 + i # <node> tokens start at index 1
-            if llm_token_position < len(llm_aligned_mapping): # Ensure we don't go out of bounds if truncated
-                llm_aligned_mapping[llm_token_position] = unique_nodes_in_segment[i]
-        llm_aligned_node_mapping = torch.tensor(llm_aligned_mapping, dtype=torch.long)
-        # --- Create LLM-aligned node sequence mapping --- END
+        # The node_sequence_mapping should contain the node_id for tokens that are nodes, and -1 otherwise.
+        node_sequence_mapping = llm_input_ids_tensor.clone()
+        if day_token_id is not None and time_token_id is not None:
+            node_sequence_mapping[-2:] = -1 # Mask the last two tokens (day, time)
 
         return {
-            'llm_input_ids': llm_input_ids_tensor,
+            'input_ids': llm_input_ids_tensor,
             'attention_mask': attention_mask,
-            'graph_node_original_ids': torch.tensor(unique_nodes_in_segment, dtype=torch.long),
-            'node_token_indices': torch.arange(1, 1 + num_nodes, dtype=torch.long), 
-            'node_text_input_ids': node_text_input_ids, # Added
-            'node_text_attention_mask': node_text_attention_mask, # Added
-            'subgraph_edge_index': subgraph_edge_index, # Added for structure-aware layer
-            'llm_aligned_node_mapping': llm_aligned_node_mapping, # NEW: Mapping aligned with LLM sequence
-            'target_coords': target_coords_scaled, # USE SCALED TARGETS
-            'pad_token_id': self.pad_token_id # Pass pad token id for collate fn
+            'node_sequence_mapping': node_sequence_mapping,
+            'target_positions': target_coords_scaled,
+            'pad_token_id': self.pad_token_id
         }
 
 def collate_trajectories(batch):
     """
-    Collate function for trajectory batches.
-    Adapts to the new input format from TrajectoryDataset.
-    Handles padding for llm_input_ids, node_text_input_ids, and the new llm_aligned_node_mapping.
+    Collate function for time-aware trajectory batches.
+    Pads input_ids, attention_mask, and node_sequence_mapping.
     """
-    max_llm_len = max(len(sample['llm_input_ids']) for sample in batch)
-    # Max number of nodes in any sample in the batch
-    max_num_nodes = max(len(sample['graph_node_original_ids']) for sample in batch)
-    # Max length of node_token_indices (should be same as max_num_nodes)
-    max_node_indices_len = max(len(sample['node_token_indices']) for sample in batch)
-    # Max length of tokenized node text
-    max_node_text_len = max(sample['node_text_input_ids'].shape[1] for sample in batch if sample['node_text_input_ids'].numel() > 0) if batch else 0
-    
-    batch_llm_input_ids = []
-    batch_llm_attention_masks = []
-    batch_graph_node_original_ids = [] # Keep as list for now
-    batch_node_token_indices = []
-    batch_node_text_input_ids = []
-    batch_node_text_attention_mask = []
-    batch_subgraph_edge_index = [] # Store as list
-    batch_llm_aligned_node_mapping = [] # NEW: List for padded aligned mappings
-    batch_target_coords = []
-    
+    max_len = max(len(sample['input_ids']) for sample in batch)
     pad_token_id = batch[0]['pad_token_id'] if batch else 0
-    node_mapping_pad_value = -1 # Use -1 for padding the node mapping
+    mapping_pad_value = -1
+
+    batch_input_ids = []
+    batch_attention_masks = []
+    batch_node_sequence_mapping = []
+    batch_target_coords = []
 
     for sample in batch:
-        # --- Pad LLM sequence --- 
-        llm_ids = sample['llm_input_ids']
-        llm_mask = sample['attention_mask']
-        aligned_mapping = sample['llm_aligned_node_mapping'] # Get the new mapping
-        current_llm_len = len(llm_ids)
-        llm_padding_len = max_llm_len - current_llm_len
+        # Pad all sequences to the max length in the batch
+        ids = sample['input_ids']
+        mask = sample['attention_mask']
+        mapping = sample['node_sequence_mapping']
         
-        if llm_padding_len > 0:
-            pad_llm_ids = torch.full((llm_padding_len,), pad_token_id, dtype=torch.long)
-            llm_ids = torch.cat([llm_ids, pad_llm_ids])
-            pad_llm_mask = torch.zeros(llm_padding_len, dtype=torch.long)
-            llm_mask = torch.cat([llm_mask, pad_llm_mask])
-            # Pad the aligned mapping as well
-            pad_aligned_mapping = torch.full((llm_padding_len,), node_mapping_pad_value, dtype=torch.long)
-            aligned_mapping = torch.cat([aligned_mapping, pad_aligned_mapping])
-        elif llm_padding_len < 0:
-             llm_ids = llm_ids[:max_llm_len]
-             llm_mask = llm_mask[:max_llm_len]
-             aligned_mapping = aligned_mapping[:max_llm_len] # Truncate mapping too
-            
-        batch_llm_input_ids.append(llm_ids.unsqueeze(0))
-        batch_llm_attention_masks.append(llm_mask.unsqueeze(0))
-        batch_llm_aligned_node_mapping.append(aligned_mapping.unsqueeze(0)) # Add padded mapping
+        padding_len = max_len - len(ids)
         
-        # --- Pad Node Text sequence --- 
-        node_text_ids = sample['node_text_input_ids']
-        node_text_mask = sample['node_text_attention_mask']
-        current_num_nodes = node_text_ids.shape[0]
-        current_text_len = node_text_ids.shape[1]
+        if padding_len > 0:
+            ids = torch.cat([ids, torch.full((padding_len,), pad_token_id, dtype=torch.long)])
+            mask = torch.cat([mask, torch.zeros(padding_len, dtype=torch.long)])
+            mapping = torch.cat([mapping, torch.full((padding_len,), mapping_pad_value, dtype=torch.long)])
         
-        # Pad number of nodes
-        node_padding_len = max_num_nodes - current_num_nodes
-        if node_padding_len > 0:
-             pad_node_text_ids = torch.full((node_padding_len, current_text_len), pad_token_id, dtype=torch.long)
-             node_text_ids = torch.cat([node_text_ids, pad_node_text_ids], dim=0)
-             pad_node_text_mask = torch.zeros((node_padding_len, current_text_len), dtype=torch.long)
-             node_text_mask = torch.cat([node_text_mask, pad_node_text_mask], dim=0)
-             
-        # Pad text length (if needed, though usually handled by tokenizer max_length)
-        text_padding_len = max_node_text_len - current_text_len
-        if text_padding_len > 0:
-             pad_text_ids = torch.full((max_num_nodes, text_padding_len), pad_token_id, dtype=torch.long)
-             node_text_ids = torch.cat([node_text_ids, pad_text_ids], dim=1)
-             pad_text_mask = torch.zeros((max_num_nodes, text_padding_len), dtype=torch.long)
-             node_text_mask = torch.cat([node_text_mask, pad_text_mask], dim=1)
-        elif text_padding_len < 0: # Truncate if somehow longer
-             node_text_ids = node_text_ids[:, :max_node_text_len]
-             node_text_mask = node_text_mask[:, :max_node_text_len]
+        batch_input_ids.append(ids.unsqueeze(0))
+        batch_attention_masks.append(mask.unsqueeze(0))
+        batch_node_sequence_mapping.append(mapping.unsqueeze(0))
+        batch_target_coords.append(sample['target_positions'].unsqueeze(0))
 
-        batch_node_text_input_ids.append(node_text_ids.unsqueeze(0))
-        batch_node_text_attention_mask.append(node_text_mask.unsqueeze(0))
-        
-        # --- Pad Node Indices sequence --- 
-        node_indices = sample['node_token_indices']
-        current_node_indices_len = len(node_indices)
-        node_indices_padding_len = max_node_indices_len - current_node_indices_len
-        
-        if node_indices_padding_len > 0:
-            # Pad with 0, assuming 0 is not a valid index for node tokens
-            pad_node_indices = torch.zeros(node_indices_padding_len, dtype=torch.long)
-            node_indices = torch.cat([node_indices, pad_node_indices])
-        elif node_indices_padding_len < 0:
-             node_indices = node_indices[:max_node_indices_len]
-             
-        batch_node_token_indices.append(node_indices.unsqueeze(0))
-        
-        # --- Pad graph info (or keep as list) --- 
-        # Padding graph_node_original_ids and node_token_indices might be needed depending on model usage
-        # For now, keep as list, but if model needs tensors, padding similar to node_text is required.
-        batch_graph_node_original_ids.append(sample['graph_node_original_ids']) 
-
-        # --- Add edge index and target --- 
-        batch_subgraph_edge_index.append(sample['subgraph_edge_index']) # Keep as list
-        batch_target_coords.append(sample['target_coords'].unsqueeze(0))
-    
-    # Stack tensors
-    batch_llm_input_ids = torch.cat(batch_llm_input_ids, dim=0)
-    batch_llm_attention_masks = torch.cat(batch_llm_attention_masks, dim=0)
-    batch_node_text_input_ids = torch.cat(batch_node_text_input_ids, dim=0) # Shape: [B, max_num_nodes, max_node_text_len]
-    batch_node_text_attention_mask = torch.cat(batch_node_text_attention_mask, dim=0) # Shape: [B, max_num_nodes, max_node_text_len]
-    batch_node_token_indices = torch.cat(batch_node_token_indices, dim=0) # Stacked tensor
-    batch_llm_aligned_node_mapping = torch.cat(batch_llm_aligned_node_mapping, dim=0) # NEW: Stacked aligned mapping
-    batch_target_coords = torch.cat(batch_target_coords, dim=0)
-    
-    # Note: graph_node_original_ids, subgraph_edge_index are still lists of tensors.
-    # The model will need to handle this format or collate_fn needs further modification.
-    
     return {
-        'input_ids': batch_llm_input_ids, # Rename for consistency with model forward args
-        'attention_mask': batch_llm_attention_masks,
-        'graph_node_original_ids': batch_graph_node_original_ids, 
-        'node_token_indices': batch_node_token_indices, 
-        'node_text_input_ids': batch_node_text_input_ids,
-        'node_text_attention_mask': batch_node_text_attention_mask,
-        'subgraph_edge_index': batch_subgraph_edge_index,
-        'node_sequence_mapping': batch_llm_aligned_node_mapping, # Rename for consistency with model forward args
-        'target_positions': batch_target_coords # Rename for consistency with model forward args
+        'input_ids': torch.cat(batch_input_ids, dim=0),
+        'attention_mask': torch.cat(batch_attention_masks, dim=0),
+        'node_sequence_mapping': torch.cat(batch_node_sequence_mapping, dim=0),
+        'target_positions': torch.cat(batch_target_coords, dim=0),
     }
 
 

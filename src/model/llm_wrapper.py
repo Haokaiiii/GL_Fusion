@@ -9,6 +9,7 @@ import torch.nn as nn
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from typing import Dict, Optional, Any
+from src.config.token_config import TokenConfig
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +54,8 @@ class QwenModel(nn.Module):
             pad_token='<|endoftext|>'
         )
         
-        # Add special tokens
-        special_tokens = ['<graph_start>', '<graph_end>', '<node>']
+        # Add special tokens from central config
+        special_tokens = TokenConfig.get_all_special_tokens()
         num_added = self.tokenizer.add_special_tokens({
             'additional_special_tokens': special_tokens
         })

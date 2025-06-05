@@ -189,8 +189,8 @@ def inverse_transform_predictions(predictions, x_scaler, y_scaler):
 
 def evaluate_validation_set(model, test_sequences, task_df, indices, node_mapping, device, x_scaler, y_scaler):
     """
-    Evaluate the model on the validation set with proper coordinate scaling.
-    For Task 2: Use days 1-59 as input to predict days 60-74 (to match validator expectations).
+    Evaluate the model on the validation set with time-aware querying.
+    For Task 2: Use days 1-59 as input to predict days 60-74.
     """
     all_predictions = []
     all_targets = []
@@ -198,21 +198,24 @@ def evaluate_validation_set(model, test_sequences, task_df, indices, node_mappin
     user_geobleu_scores = []
     user_dtw_scores = []
 
-    # Create a KD-tree for fast nearest neighbor search of node coordinates
-    node_coords_list = list(node_mapping.keys())
-    node_coords_array = np.array(node_coords_list)
-    kdtree = cKDTree(node_coords_array)
+    # Get the tokenizer from the model to access special tokens
+    tokenizer = model.llm.tokenizer
+    
+    # Get day and time token IDs
+    from src.config.token_config import TokenConfig
+    day_token_ids = {i: tokenizer.convert_tokens_to_ids(TokenConfig.get_day_token(i)) for i in range(TokenConfig.MAX_DAYS)}
+    time_token_ids = {i: tokenizer.convert_tokens_to_ids(TokenConfig.get_time_token(i)) for i in range(TokenConfig.MAX_HOURS)}
 
     # Get unique users in the validation set
     all_val_users = set(task_df.iloc[indices]['uid'].values)
 
-    # Apply fast evaluation limits from environment variables for faster dev runs
+    # Apply fast evaluation limits
     max_val_users = int(os.environ.get('MAX_VAL_USERS', '0'))
     if max_val_users > 0 and len(all_val_users) > max_val_users:
         import random
-        random.seed(42)  # for reproducibility
+        random.seed(42)
         val_users = set(random.sample(list(all_val_users), max_val_users))
-        logger.info(f'Fast evaluation: Limited to {max_val_users} users out of {len(all_val_users)} total')
+        logger.info(f'Fast evaluation: Limited to {max_val_users} users.')
     else:
         val_users = all_val_users
         logger.info(f"Evaluating on all {len(val_users)} users in the validation set.")
@@ -221,47 +224,57 @@ def evaluate_validation_set(model, test_sequences, task_df, indices, node_mappin
         if uid not in test_sequences:
             continue
         
-        # Get the user's sequence and data
-        node_seq = test_sequences[uid]
+        user_full_sequence = test_sequences[uid] # This is a list of (node_id, d, t)
         user_df = task_df[(task_df['uid'] == uid) & task_df.index.isin(indices)].sort_values(by=['d', 't'])
         
-        # Skip if not enough data
         if len(user_df) < 2:
             continue
 
-        # For Task 2: Use days 1-59 to predict days 60-74 (to match validator expectations)
-        # Get training data (days 1-59) and target data (days 60-74)
-        train_data = user_df[user_df['d'] <= 59]
-        target_data = user_df[(user_df['d'] >= 60) & (user_df['d'] <= 74)]
-        
-        if len(train_data) == 0 or len(target_data) == 0:
-            continue  # Skip users without proper train/target split
-            
-        # Use the last sequence from training period (day 59) as input context
-        train_end_idx = len(train_data) - 1
-        seq_len = 24  # Use last 24 locations from training period
-        
-        if train_end_idx + 1 >= seq_len:
-            current_input_seq = node_seq[train_end_idx - seq_len + 1 : train_end_idx + 1]
-        else:
-            padding = [0] * (seq_len - (train_end_idx + 1))
-            current_input_seq = padding + node_seq[:train_end_idx + 1]
+        # Split data into history (days < 60) and target (days 60-74)
+        train_data = [item for item in user_full_sequence if item[1] < 60]
+        target_data_from_seq = [item for item in user_full_sequence if 60 <= item[1] <= 74]
 
-        # Collect predicted and target trajectories for the current user
+        # Use the corresponding part of the dataframe for target coordinates
+        target_df = user_df[(user_df['d'] >= 60) & (user_df['d'] <= 74)]
+
+        if not train_data or target_df.empty:
+            continue
+
+        # The history is the sequence of node IDs from the training period
+        history_node_ids = [item[0] for item in train_data]
+        
+        # Collect trajectories for metrics
         user_predicted_trajectory = []
         user_target_trajectory = []
-
-        # Predict each day in the emergency period (days 60-74)
-        for _, target_row in target_data.iterrows():
+        
+        # Predict each timestamp in the target period directly
+        for i, target_row in enumerate(target_df.iterrows()):
+            target_row = target_row[1] # get the series from the tuple
             target_d = target_row['d']
             target_t = target_row['t']
             target_coords = np.array([target_row['x'], target_row['y']])
             
+            # --- Create the time-aware input ---
+            day_token = day_token_ids.get(target_d)
+            time_token = time_token_ids.get(target_t)
+
+            if day_token is None or time_token is None:
+                logger.warning(f"UID {uid}: Could not find time tokens for d={target_d}, t={target_t}. Skipping prediction.")
+                continue
+
+            # Use the last part of the history as context
+            seq_len = 24 
+            context_seq = history_node_ids[-seq_len:]
+            input_seq = context_seq + [day_token, time_token]
+
             # Prepare input for the model
-            input_tensor = torch.tensor(current_input_seq, dtype=torch.long).unsqueeze(0).to(device)
-            attention_mask = (input_tensor > 0).long()
-            node_seq_mapping = input_tensor.clone()
+            input_tensor = torch.tensor(input_seq, dtype=torch.long).unsqueeze(0).to(device)
+            attention_mask = torch.ones_like(input_tensor)
             
+            # Create the node sequence mapping
+            node_seq_mapping = input_tensor.clone()
+            node_seq_mapping[0, -2:] = -1 # Mask day and time tokens
+
             # Forward pass
             with torch.no_grad():
                 predictions_dict = model(
@@ -270,36 +283,19 @@ def evaluate_validation_set(model, test_sequences, task_df, indices, node_mappin
                     node_sequence_mapping=node_seq_mapping
                 )
             
-            # Extract predictions from dictionary (handle GLFusionModel output format)
-            if isinstance(predictions_dict, dict) and 'predictions' in predictions_dict:
-                predictions_tensor = predictions_dict['predictions']
-            else:
-                predictions_tensor = predictions_dict
-            
-            # Convert prediction to numpy and inverse-transform with clamping
+            predictions_tensor = predictions_dict['predictions']
             pred_coords_scaled = predictions_tensor.cpu().numpy()[0]
             pred_coords = inverse_transform_predictions(pred_coords_scaled, x_scaler, y_scaler)
             
-            # Find the nearest node ID for the predicted coordinates to make predictions autoregressive
-            dist, idx = kdtree.query(pred_coords)
-            predicted_node_id = node_mapping[tuple(node_coords_array[idx])]
-            
-            # Update the input sequence for the next prediction
-            current_input_seq = current_input_seq[1:] + [predicted_node_id]
-
-            # Store predictions and targets
+            # Store results
             all_predictions.append(pred_coords)
             all_targets.append(target_coords)
             
-            # Append to user-specific trajectories for GeoBLEU/DTW
             user_predicted_trajectory.append((target_d, target_t, pred_coords[0], pred_coords[1]))
             user_target_trajectory.append((target_d, target_t, target_coords[0], target_coords[1]))
             
-            # Store the prediction record
             prediction_records.append({
                 'uid': uid,
-                'current_d': 59,  # Input context ends at day 59
-                'current_t': train_data.iloc[-1]['t'] if len(train_data) > 0 else 0,  # Last time from training
                 'target_d': target_d,
                 'target_t': target_t,
                 'pred_x': pred_coords[0],

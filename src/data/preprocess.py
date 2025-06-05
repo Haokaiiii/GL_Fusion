@@ -404,27 +404,19 @@ def construct_graph(node_mapping, node_features, config):
 def prepare_llm_sequences(task1_trajectories, task2_trajectories, node_mapping, config):
     """
     Step 4.6: Prepare sequences for LLM input.
-    
-    Args:
-        task1_trajectories: Dictionary containing trajectories for task 1.
-        task2_trajectories: Dictionary containing trajectories for task 2.
-        node_mapping: Dictionary mapping (x, y) coordinates to node IDs.
-        config: Dictionary containing configuration parameters.
-        
-    Returns:
-        None. Saves the prepared sequences to disk.
+    Now stores (node_id, day, time) tuples to support time-aware models.
     """
-    logger.info("Preparing sequences for LLM input...")
+    logger.info("Preparing sequences for LLM input (including time information)...")
     
     llm_prepared_dir = config['data']['llm_prepared_dir']
     os.makedirs(llm_prepared_dir, exist_ok=True)
     
-    # Helper function to convert trajectories to sequences of node IDs
+    # Helper function to convert trajectories to sequences of (node_id, d, t) tuples
     def _trajectories_to_node_sequences(trajectories):
         node_sequences = {}
-        for uid, traj in trajectories.items():
-            # Convert each (d, t, x, y) point to a node ID
-            node_seq = [node_mapping[(x, y)] for d, t, x, y in traj]
+        for uid, traj in tqdm(trajectories.items(), desc="Converting trajectories to node sequences"):
+            # Convert each (d, t, x, y) point to a (node_id, d, t) tuple
+            node_seq = [(node_mapping[(x, y)], d, t) for d, t, x, y in traj]
             node_sequences[uid] = node_seq
         return node_sequences
     
@@ -446,7 +438,7 @@ def prepare_llm_sequences(task1_trajectories, task2_trajectories, node_mapping, 
         os.path.join(llm_prepared_dir, 'llm_sequences_train_val_task2.pt')
     )
     
-    logger.info("Saved LLM sequences for both tasks")
+    logger.info("Saved LLM sequences (with time info) for both tasks")
 
 def main():
     """Main preprocessing function to run all steps."""
