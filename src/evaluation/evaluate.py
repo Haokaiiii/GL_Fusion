@@ -119,6 +119,12 @@ def load_model_with_scaling_support(checkpoint_path, config, device):
         logger.info("Checkpoint loaded with strict=False")
     
     model.to(device)
+    
+    # Precompute graph embeddings for efficiency
+    if hasattr(model, 'precompute_graph_embeddings'):
+        logger.info("Precomputing graph embeddings...")
+        model.precompute_graph_embeddings()
+    
     model.eval()
     
     return model
@@ -243,6 +249,9 @@ def evaluate_validation_set(model, test_sequences, task_df, indices, node_mappin
         # The history is the sequence of node IDs from the training period
         history_node_ids = [item[0] for item in train_data]
         
+        # Initialize a working sequence that we'll update with predictions
+        working_sequence = history_node_ids.copy()
+        
         # Collect trajectories for metrics
         user_predicted_trajectory = []
         user_target_trajectory = []
@@ -263,9 +272,9 @@ def evaluate_validation_set(model, test_sequences, task_df, indices, node_mappin
                 logger.warning(f"UID {uid}: Could not find time tokens for d={target_d}, t={target_t}. Skipping prediction.")
                 continue
 
-            # Use the last part of the history as context
+            # Use the last part of the working sequence as context
             seq_len = 24 
-            context_seq = history_node_ids[-seq_len:]
+            context_seq = working_sequence[-seq_len:]
             input_seq = context_seq + [day_token, time_token]
 
             # Prepare input for the model
@@ -304,6 +313,14 @@ def evaluate_validation_set(model, test_sequences, task_df, indices, node_mappin
                 'target_x': target_coords[0],
                 'target_y': target_coords[1]
             })
+            
+            # Update working sequence with predicted node for autoregressive prediction
+            # Find the closest node to the predicted coordinates
+            pred_x_int = int(round(pred_coords[0]))
+            pred_y_int = int(round(pred_coords[1]))
+            if (pred_x_int, pred_y_int) in node_mapping:
+                predicted_node_id = node_mapping[(pred_x_int, pred_y_int)]
+                working_sequence.append(predicted_node_id)
         
         # Calculate GeoBLEU and DTW for the current user
         if user_predicted_trajectory and user_target_trajectory:

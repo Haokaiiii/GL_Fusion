@@ -90,6 +90,17 @@ class GLFusionModel(nn.Module):
             dropout=fusion_config.get('dropout', 0.1)
         )
         
+        # Temporal fusion for combining day and time tokens
+        self.temporal_fusion = nn.MultiheadAttention(
+            embed_dim=fusion_config['hidden_dim'],
+            num_heads=fusion_config['num_heads'],
+            dropout=fusion_config.get('dropout', 0.1),
+            batch_first=True
+        )
+        
+        # Temporal projection layer
+        self.temporal_projection = nn.Linear(fusion_config['hidden_dim'], fusion_config['hidden_dim'])
+        
         # Prediction head
         fusion_dim = fusion_config['hidden_dim']
         self.predictor = nn.Sequential(
@@ -99,6 +110,23 @@ class GLFusionModel(nn.Module):
             nn.Linear(fusion_dim // 2, 2),  # Predict (x, y) coordinates
             nn.Sigmoid()
         )
+        
+        # Cache for graph embeddings to avoid recomputation
+        self._cached_node_embeddings = None
+        self._cached_node_ids = None
+    
+    def precompute_graph_embeddings(self):
+        """Precompute embeddings for all nodes in the graph."""
+        device = next(self.parameters()).device
+        
+        # Project all node features
+        projected_features = self.feature_projection(self.node_features.to(device))
+        
+        # Process through GNN
+        self._cached_node_embeddings = self.gnn(projected_features, self.edge_index.to(device))
+        self._cached_node_ids = torch.arange(self.node_features.shape[0], device=device)
+        
+        logger.info(f"Precomputed embeddings for {self.node_features.shape[0]} nodes")
     
     def forward(
         self, 
@@ -167,38 +195,48 @@ class GLFusionModel(nn.Module):
         # Extract unique nodes from the batch
         unique_nodes = torch.unique(
             node_sequence_mapping[node_sequence_mapping >= 0]
-        ).cpu()  # Keep unique_nodes on CPU for initial processing if it's small
+        )
         
         if len(unique_nodes) == 0:
             # No valid nodes, return empty embeddings
             return torch.zeros(0, self.gnn_output_dim, device=device)
         
+        # Use cached embeddings if available
+        if self._cached_node_embeddings is not None:
+            # Simply retrieve the cached embeddings for the unique nodes
+            node_embeddings = self._cached_node_embeddings[unique_nodes]
+            
+            # Create node ID mapping for compatibility
+            node_id_map = {nid.item(): i for i, nid in enumerate(unique_nodes)}
+            self._current_node_id_map = node_id_map
+            
+            return node_embeddings
+        
+        # Otherwise, compute embeddings on the fly (fallback for backward compatibility)
+        unique_nodes_cpu = unique_nodes.cpu()
+        
         # Move features to device and project
-        subgraph_features = self.node_features[unique_nodes].to(device)
+        subgraph_features = self.node_features[unique_nodes_cpu].to(device)
         projected_features = self.feature_projection(subgraph_features)
         
         # Ensure edge_index is on the correct device
         current_edge_index = self.edge_index.to(device)
         
         # Extract relevant edges
-        # Move unique_nodes to the same device as current_edge_index for isin operation
-        edge_mask = torch.isin(current_edge_index[0], unique_nodes.to(device)) & \
-                   torch.isin(current_edge_index[1], unique_nodes.to(device))
+        edge_mask = torch.isin(current_edge_index[0], unique_nodes) & \
+                   torch.isin(current_edge_index[1], unique_nodes)
         subgraph_edges = current_edge_index[:, edge_mask]
         
         # Create node ID mapping for the subgraph
-        # Convert unique_nodes to a list of Python integers for the dictionary keys
-        node_id_map = {nid: i for i, nid in enumerate(unique_nodes.tolist())}
+        node_id_map = {nid.item(): i for i, nid in enumerate(unique_nodes)}
         
         # Remap edges to local indices
         if subgraph_edges.shape[1] > 0:
             remapped_edges = torch.zeros_like(subgraph_edges)
             for i in range(2):
                 for j, node_id in enumerate(subgraph_edges[i]):
-                    remapped_edges[i, j] = node_id_map.get(int(node_id), 0)
-            subgraph_edges = remapped_edges.to(device)
-        else:
-            subgraph_edges = subgraph_edges.to(device)
+                    remapped_edges[i, j] = node_id_map.get(node_id.item(), 0)
+            subgraph_edges = remapped_edges
         
         # Process through GNN
         node_embeddings = self.gnn(projected_features, subgraph_edges)
@@ -231,18 +269,42 @@ class GLFusionModel(nn.Module):
         attention_mask: torch.Tensor,
         device: torch.device
     ) -> torch.Tensor:
-        """Make coordinate predictions from fused representations."""
+        """Make coordinate predictions from fused representations with temporal awareness."""
         batch_size = fused_representation.shape[0]
+        seq_len = fused_representation.shape[1]
         
-        # Get the last valid position for each sequence
+        # Get the last two positions (day and time tokens)
+        # We assume the input format is [...history..., day_token, time_token]
         last_positions = attention_mask.sum(dim=1) - 1
+        day_positions = last_positions - 1
+        
         indices = torch.arange(batch_size, device=device)
         
-        # Extract last hidden states
-        last_hidden_states = fused_representation[indices, last_positions]
+        # Extract day and time representations
+        day_representations = fused_representation[indices, day_positions]
+        time_representations = fused_representation[indices, last_positions]
+        
+        # Also get the last node representation (before temporal tokens)
+        # Find the last node position (3 positions before the end)
+        node_positions = torch.clamp(last_positions - 2, min=0)
+        last_node_representations = fused_representation[indices, node_positions]
+        
+        # Stack temporal representations for attention
+        temporal_features = torch.stack([day_representations, time_representations, last_node_representations], dim=1)
+        
+        # Apply temporal fusion to combine day, time, and last location context
+        fused_temporal, _ = self.temporal_fusion(
+            temporal_features, temporal_features, temporal_features
+        )
+        
+        # Take the attended representation (we can take mean or the first one)
+        final_representation = fused_temporal.mean(dim=1)
+        
+        # Apply temporal projection
+        final_representation = self.temporal_projection(final_representation)
         
         # Apply predictor
-        predictions = self.predictor(last_hidden_states)
+        predictions = self.predictor(final_representation)
         
         return predictions
     

@@ -80,6 +80,11 @@ def main():
     logger.info("Building model...")
     model = ModelFactory.build_model(config)
     
+    # Precompute graph embeddings for efficiency
+    if hasattr(model, 'precompute_graph_embeddings'):
+        logger.info("Precomputing graph embeddings...")
+        model.precompute_graph_embeddings()
+    
     # Calculate total training steps
     num_epochs = config['training']['num_epochs']
     steps_per_epoch = len(train_loader) // config['training'].get('gradient_accumulation_steps', 1)
