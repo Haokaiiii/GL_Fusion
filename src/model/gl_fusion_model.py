@@ -96,7 +96,8 @@ class GLFusionModel(nn.Module):
             nn.Linear(fusion_dim, fusion_dim // 2),
             nn.ReLU(),
             nn.Dropout(0.1),
-            nn.Linear(fusion_dim // 2, 2)  # Predict (x, y) coordinates
+            nn.Linear(fusion_dim // 2, 2),  # Predict (x, y) coordinates
+            nn.Sigmoid()
         )
     
     def forward(
