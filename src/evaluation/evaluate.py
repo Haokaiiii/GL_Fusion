@@ -19,6 +19,7 @@ from sklearn.preprocessing import MinMaxScaler
 import warnings
 import geobleu # For GeoBLEU and DTW
 from scipy.spatial import cKDTree
+from collections import defaultdict
 
 # Add the src directory to the path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -201,8 +202,7 @@ def evaluate_validation_set(model, test_sequences, task_df, indices, node_mappin
     all_predictions = []
     all_targets = []
     prediction_records = []
-    user_geobleu_scores = []
-    user_dtw_scores = []
+    user_geobleu = {}
 
     # Get the tokenizer from the model to access special tokens
     tokenizer = model.llm.tokenizer
@@ -322,17 +322,29 @@ def evaluate_validation_set(model, test_sequences, task_df, indices, node_mappin
                 predicted_node_id = node_mapping[(pred_x_int, pred_y_int)]
                 working_sequence.append(predicted_node_id)
         
-        # Calculate GeoBLEU and DTW for the current user
+        # Calculate GeoBLEU for the current user
         if user_predicted_trajectory and user_target_trajectory:
             try:
-                if len(user_predicted_trajectory) >= 1 and len(user_target_trajectory) >= 1:
-                    gb_score = geobleu.calc_geobleu_single(user_predicted_trajectory, user_target_trajectory)
-                    user_geobleu_scores.append(gb_score)
+                geobleu_values = []
+                gen_by_day = defaultdict(list)
+                ref_by_day = defaultdict(list)
 
-                dtw_score = geobleu.calc_dtw_single(user_predicted_trajectory, user_target_trajectory)
-                user_dtw_scores.append(dtw_score)
+                # **按天数分组**
+                for record in user_predicted_trajectory:
+                    gen_by_day[record[0]].append(record)
+                for record in user_target_trajectory:
+                    ref_by_day[record[0]].append(record)
+
+                # **计算 GEOBLUE**
+                for day in gen_by_day.keys():
+                    if day in ref_by_day:
+                        geobleu_val = geobleu.calc_geobleu(gen_by_day[day], ref_by_day[day], processes=3)
+
+                        geobleu_values.append(geobleu_val)
+
+                user_geobleu[uid] = np.mean(geobleu_values) if geobleu_values else 0
             except Exception as e:
-                logger.warning(f'Could not calculate GeoBLEU/DTW for UID {uid}. Error: {e}')
+                logger.warning(f'Could not calculate GeoBLEU for UID {uid}. Error: {e}')
 
     # Calculate metrics
     all_predictions_np = np.array(all_predictions)
@@ -342,21 +354,16 @@ def evaluate_validation_set(model, test_sequences, task_df, indices, node_mappin
     else:
         metrics = {'mse': float('nan'), 'euclidean_dist': float('nan')}
 
-    # Add average GeoBLEU and DTW to metrics
-    if user_geobleu_scores:
-        metrics['geo_bleu'] = np.mean(user_geobleu_scores)
+    # Add average GeoBLEU to metrics
+    if user_geobleu:
+        metrics['geo_bleu'] = np.mean(list(user_geobleu.values()))
     else:
         metrics['geo_bleu'] = float('nan')
-        
-    if user_dtw_scores:
-        metrics['dtw'] = np.mean(user_dtw_scores)
-    else:
-        metrics['dtw'] = float('nan')
 
     # Create predictions dataframe
     predictions_df = pd.DataFrame(prediction_records)
     
-    return metrics, predictions_df
+    return metrics, predictions_df, user_geobleu
 
 
 def main():
@@ -395,7 +402,7 @@ def main():
     
     # Evaluate on appropriate split
     if args.split == 'val':
-        metrics, predictions_df = evaluate_validation_set(
+        metrics, predictions_df, user_geobleu = evaluate_validation_set(
             model, test_sequences, task_df, indices, node_mapping, args.device, x_scaler, y_scaler
         )
         
@@ -404,6 +411,17 @@ def main():
         for k, v in metrics.items():
             logger.info(f"  {k}: {v:.4f}")
         
+        # **输出结果**
+        logger.info(f"Users GEOBLEU: {user_geobleu}")
+        if user_geobleu:
+            logger.info(f"GEOBLEU: {np.mean(list(user_geobleu.values()))}")
+            ranges = [(0, 2999), (3000, 5999), (6000, 8999)]
+
+            for start, end in ranges:
+                group_values = [val for uid, val in user_geobleu.items() if start <= uid <= end]
+                mean_val = np.mean(group_values) if group_values else 0
+                logger.info(f"User ID {start}-{end} GEOBLEU 平均值: {mean_val}")
+
         # Save results if output path is provided
         if args.output:
             os.makedirs(os.path.dirname(args.output), exist_ok=True)

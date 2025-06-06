@@ -153,7 +153,8 @@ class CrossAttentionFusion(nn.Module):
     
     def enable_gradient_checkpointing(self):
         """Enable gradient checkpointing for memory efficiency."""
-        self.gradient_checkpointing = True
+        # self.gradient_checkpointing = True
+        pass
     
     def _init_weights(self):
         """Initialize weights with Xavier uniform."""
@@ -241,6 +242,11 @@ class CrossAttentionFusion(nn.Module):
             device=device, dtype=node_proj.dtype
         )
         
+        # Create a list to collect embedding updates to avoid in-place operations
+        updates = []
+        batch_indices = []
+        seq_indices = []
+        
         # Fill in node embeddings where applicable
         for b in range(batch_size):
             # Get valid node positions
@@ -255,8 +261,31 @@ class CrossAttentionFusion(nn.Module):
                 max_node_idx = node_proj.shape[0] - 1
                 node_indices = torch.clamp(node_indices, 0, max_node_idx)
                 
-                # Select and assign embeddings
+                # Select embeddings and collect indices for batch update
                 selected_embeddings = node_proj[node_indices]
-                batch_node_embeddings[b, valid_positions] = selected_embeddings
+                updates.append(selected_embeddings)
+                
+                # Create batch and sequence indices
+                batch_idx = torch.full((len(valid_positions),), b, device=device, dtype=torch.long)
+                batch_indices.append(batch_idx)
+                seq_indices.append(valid_positions)
+        
+        # Apply all updates at once using scatter to avoid in-place operations
+        if updates:
+            all_updates = torch.cat(updates, dim=0)
+            all_batch_indices = torch.cat(batch_indices, dim=0)
+            all_seq_indices = torch.cat(seq_indices, dim=0)
+            
+            # Create linear indices for scatter operation
+            linear_indices = all_batch_indices * seq_len + all_seq_indices
+            
+            # Flatten the batch_node_embeddings for scatter operation
+            flat_embeddings = batch_node_embeddings.view(-1, hidden_dim)
+            
+            # Use scatter to update embeddings without in-place operations
+            flat_embeddings = flat_embeddings.scatter(0, linear_indices.unsqueeze(1).expand(-1, hidden_dim), all_updates)
+            
+            # Reshape back to original shape
+            batch_node_embeddings = flat_embeddings.view(batch_size, seq_len, hidden_dim)
         
         return batch_node_embeddings 

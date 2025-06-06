@@ -122,8 +122,9 @@ class GLFusionModel(nn.Module):
         # Project all node features
         projected_features = self.feature_projection(self.node_features.to(device))
         
-        # Process through GNN
-        self._cached_node_embeddings = self.gnn(projected_features, self.edge_index.to(device))
+        # Process through GNN and detach from computational graph
+        with torch.no_grad():
+            self._cached_node_embeddings = self.gnn(projected_features, self.edge_index.to(device)).detach()
         self._cached_node_ids = torch.arange(self.node_features.shape[0], device=device)
         
         logger.info(f"Precomputed embeddings for {self.node_features.shape[0]} nodes")
@@ -203,8 +204,9 @@ class GLFusionModel(nn.Module):
         
         # Use cached embeddings if available
         if self._cached_node_embeddings is not None:
-            # Simply retrieve the cached embeddings for the unique nodes
-            node_embeddings = self._cached_node_embeddings[unique_nodes]
+            # Retrieve from cache. Move unique_nodes to CPU for indexing, then move result to target device.
+            # Use .clone() to create a proper copy and avoid in-place operation errors
+            node_embeddings = self._cached_node_embeddings[unique_nodes.to('cpu')].clone().to(device)
             
             # Create node ID mapping for compatibility
             node_id_map = {nid.item(): i for i, nid in enumerate(unique_nodes)}
@@ -281,13 +283,13 @@ class GLFusionModel(nn.Module):
         indices = torch.arange(batch_size, device=device)
         
         # Extract day and time representations
-        day_representations = fused_representation[indices, day_positions]
-        time_representations = fused_representation[indices, last_positions]
+        day_representations = fused_representation[indices, day_positions].clone()
+        time_representations = fused_representation[indices, last_positions].clone()
         
         # Also get the last node representation (before temporal tokens)
         # Find the last node position (3 positions before the end)
         node_positions = torch.clamp(last_positions - 2, min=0)
-        last_node_representations = fused_representation[indices, node_positions]
+        last_node_representations = fused_representation[indices, node_positions].clone()
         
         # Stack temporal representations for attention
         temporal_features = torch.stack([day_representations, time_representations, last_node_representations], dim=1)

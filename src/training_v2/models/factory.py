@@ -203,7 +203,9 @@ class ModelFactory:
                 model,
                 device_ids=[distributed_manager.local_rank] if device.type == 'cuda' else None,
                 output_device=distributed_manager.local_rank if device.type == 'cuda' else None,
-                find_unused_parameters=False
+                find_unused_parameters=True
             )
+            # Set the static graph flag to resolve checkpointing conflicts with DDP
+            model._set_static_graph()
             
         return model 

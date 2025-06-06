@@ -74,9 +74,9 @@ twin_predictor:
 # Training Parameters
 training:
   batch_size: 1     # Start with 1 for stability
-  num_epochs: 5     # Reduced from 50 for fast testing
+  num_epochs: 50     # Increased for production training
   gradient_clip_val: 1.0
-  early_stopping_patience: 3  # Reduced for fast testing
+  early_stopping_patience: 5  # Increased for production training
   validation_interval: 1
   ddp_static_graph: true
   gradient_accumulation_steps: 4  # Reasonable for single GPU
@@ -85,12 +85,12 @@ training:
   weight_decay: 0.01
   scheduler:
     type: "linear"
-    num_warmup_steps: 50  # Reduced warmup
+    num_warmup_steps: 500  # Increased for longer training
     warmup_ratio: 0.1
     patience: 2
     factor: 0.5
   seed: 42
-  train_data_subsample_ratio: 0.001  # Very small for testing
+  train_data_subsample_ratio: 1.0  # Default to full dataset
 
 # Evaluation Parameters
 evaluation:
