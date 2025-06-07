@@ -19,6 +19,7 @@ env/
 .env/
 .venv/
 ENV/
+gl_env/
 # requirements.txt # Typically committed, but add here if you specifically want to ignore it.
 # conda.txt # Add here if you specifically want to ignore it.
 

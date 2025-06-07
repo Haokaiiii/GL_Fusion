@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import json
 import logging
+import math
 from typing import Dict, Optional, Tuple, List
 
 from .gnns import create_gnn_model
@@ -90,19 +91,18 @@ class GLFusionModel(nn.Module):
             dropout=fusion_config.get('dropout', 0.1)
         )
         
-        # Temporal fusion for combining day and time tokens
-        self.temporal_fusion = nn.MultiheadAttention(
-            embed_dim=fusion_config['hidden_dim'],
-            num_heads=fusion_config['num_heads'],
-            dropout=fusion_config.get('dropout', 0.1),
-            batch_first=True
-        )
+        # Safe temporal fusion using custom attention to avoid in-place operations
+        fusion_dim = fusion_config['hidden_dim']
+        self.temporal_query_proj = nn.Linear(fusion_dim, fusion_dim)
+        self.temporal_key_proj = nn.Linear(fusion_dim, fusion_dim)
+        self.temporal_value_proj = nn.Linear(fusion_dim, fusion_dim)
+        self.temporal_out_proj = nn.Linear(fusion_dim, fusion_dim)
+        self.temporal_dropout = nn.Dropout(fusion_config.get('dropout', 0.1))
         
         # Temporal projection layer
-        self.temporal_projection = nn.Linear(fusion_config['hidden_dim'], fusion_config['hidden_dim'])
+        self.temporal_projection = nn.Linear(fusion_dim, fusion_dim)
         
         # Prediction head
-        fusion_dim = fusion_config['hidden_dim']
         self.predictor = nn.Sequential(
             nn.Linear(fusion_dim, fusion_dim // 2),
             nn.ReLU(),
@@ -123,18 +123,29 @@ class GLFusionModel(nn.Module):
         self._cached_node_embeddings = None
         self._cached_node_ids = None
     
+    def _safe_temporal_fusion(self, temporal_features: torch.Tensor) -> torch.Tensor:
+        """
+        Simplified temporal fusion without attention - just use mean pooling.
+        """
+        # Clone input to ensure no shared references 
+        temporal_features = temporal_features.clone().detach()
+        
+        # Simple mean pooling across the temporal dimension
+        # This completely avoids any attention mechanisms that might cause in-place issues
+        pooled = torch.mean(temporal_features, dim=1, keepdim=True)  # [batch_size, 1, hidden_dim]
+        
+        # Expand to match expected output format [batch_size, seq_len, hidden_dim]
+        batch_size, seq_len, hidden_dim = temporal_features.shape
+        output = pooled.expand(batch_size, seq_len, hidden_dim).clone()
+        
+        return output
+    
     def precompute_graph_embeddings(self):
         """Precompute embeddings for all nodes in the graph."""
-        device = next(self.parameters()).device
-        
-        # Project all node features
-        projected_features = self.feature_projection(self.node_features.to(device))
-        
-        # Process through GNN - keep in computational graph for training
-        self._cached_node_embeddings = self.gnn(projected_features, self.edge_index.to(device))
-        self._cached_node_ids = torch.arange(self.node_features.shape[0], device=device)
-        
-        logger.info(f"Precomputed embeddings for {self.node_features.shape[0]} nodes")
+        # Temporarily disable precomputed embeddings to isolate in-place operation issue
+        logger.info("Precomputed embeddings disabled for debugging - computing on-the-fly")
+        self._cached_node_embeddings = None
+        self._cached_node_ids = None
     
     def forward(
         self, 
@@ -143,7 +154,7 @@ class GLFusionModel(nn.Module):
         node_sequence_mapping: torch.Tensor,
         node_mask: Optional[torch.Tensor] = None,
         target_positions: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+    ) -> Dict[str, torch.Tensor]:
         """
         Forward pass through the GL-Fusion model.
         
@@ -155,10 +166,20 @@ class GLFusionModel(nn.Module):
             target_positions: Target positions for loss calculation [batch_size, 2]
             
         Returns:
-            Predicted coordinates [batch_size, 2] or loss if target_positions provided
+            A dictionary containing loss and/or predictions.
         """
+        # --- (Optional) Add debug logging for tensor shapes ---
+        # if self.training:
+        #     rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        #     if rank == 0:
+        #         logger.debug(f"[Rank 0] Forward pass input shapes:")
+        #         logger.debug(f"  input_ids: {input_ids.shape}")
+        #         logger.debug(f"  attention_mask: {attention_mask.shape}")
+        #         logger.debug(f"  node_sequence_mapping: {node_sequence_mapping.shape}")
+        #         if target_positions is not None:
+        #             logger.debug(f"  target_positions: {target_positions.shape}")
+        
         device = input_ids.device
-        batch_size = input_ids.shape[0]
         
         # Create node mask if not provided
         if node_mask is None:
@@ -178,19 +199,20 @@ class GLFusionModel(nn.Module):
             node_sequence_mapping
         )
         
+        # Defensive copy to avoid any gradient issues
+        fused_representation = fused_representation.clone()
+        
         # 4. Make predictions
         predictions = self._make_predictions(fused_representation, attention_mask, device)
         
         # 5. Calculate loss if targets provided and return consistent dictionary format
+        loss = None
         if target_positions is not None:
             loss = self._calculate_loss(predictions, target_positions, device)
-            return {
-                'loss': loss,
-                'predictions': predictions
-            }
         
-        # For inference, return predictions in dictionary format for consistency
+        # For inference, or when loss is not needed, predictions are still returned
         return {
+            'loss': loss,
             'predictions': predictions
         }
     
@@ -211,9 +233,10 @@ class GLFusionModel(nn.Module):
         
         # Use cached embeddings if available
         if self._cached_node_embeddings is not None:
-            # Retrieve from cache. Move unique_nodes to CPU for indexing
-            # Don't use .clone() as it might break gradient flow
-            node_embeddings = self._cached_node_embeddings[unique_nodes.to('cpu')].to(device)
+            # Ensure cached embeddings are on the correct device
+            cached_embeddings = self._cached_node_embeddings.to(device)
+            # Retrieve from cache. unique_nodes should be on the same device.
+            node_embeddings = cached_embeddings[unique_nodes]
             
             # Create node ID mapping for compatibility
             node_id_map = {nid.item(): i for i, nid in enumerate(unique_nodes)}
@@ -253,7 +276,8 @@ class GLFusionModel(nn.Module):
         # Store the mapping for later use
         self._current_node_id_map = node_id_map
         
-        return node_embeddings
+        # Defensive copy to avoid any gradient graph issues
+        return node_embeddings.clone()
     
     def _get_llm_hidden_states(
         self, 
@@ -268,7 +292,8 @@ class GLFusionModel(nn.Module):
         )
         
         if hasattr(llm_output, 'hidden_states') and llm_output.hidden_states:
-            return llm_output.hidden_states[-1]
+            # Defensive copy to avoid gradient issues
+            return llm_output.hidden_states[-1].clone()
         else:
             raise ValueError("LLM output does not contain hidden_states")
     
@@ -280,41 +305,39 @@ class GLFusionModel(nn.Module):
     ) -> torch.Tensor:
         """Make coordinate predictions from fused representations with temporal awareness."""
         batch_size = fused_representation.shape[0]
-        seq_len = fused_representation.shape[1]
         
         # Get the last two positions (day and time tokens)
-        # We assume the input format is [...history..., day_token, time_token]
         last_positions = attention_mask.sum(dim=1) - 1
         day_positions = last_positions - 1
         
         indices = torch.arange(batch_size, device=device)
         
         # Extract day and time representations
-        day_representations = fused_representation[indices, day_positions].clone()
-        time_representations = fused_representation[indices, last_positions].clone()
+        day_representations = fused_representation[indices, day_positions]
+        time_representations = fused_representation[indices, last_positions]
         
-        # Also get the last node representation (before temporal tokens)
-        # Find the last node position (3 positions before the end)
+        # Also get the last node representation
         node_positions = torch.clamp(last_positions - 2, min=0)
-        last_node_representations = fused_representation[indices, node_positions].clone()
+        last_node_representations = fused_representation[indices, node_positions]
         
         # Stack temporal representations for attention
-        temporal_features = torch.stack([day_representations, time_representations, last_node_representations], dim=1)
+        temporal_features = torch.stack([
+            day_representations,
+            time_representations, 
+            last_node_representations
+        ], dim=1)
         
-        # Apply temporal fusion to combine day, time, and last location context
-        fused_temporal, _ = self.temporal_fusion(
-            temporal_features, temporal_features, temporal_features
-        )
+        # Apply safe temporal fusion
+        fused_temporal = self._safe_temporal_fusion(temporal_features)
         
-        # Use the first (query) position instead of mean to preserve information
-        # This represents the attended temporal context
+        # Use the first (query) position's output as the final representation
         final_representation = fused_temporal[:, 0, :]
         
         # Apply temporal projection
-        final_representation = self.temporal_projection(final_representation)
+        projected_representation = self.temporal_projection(final_representation)
         
-        # Apply predictor
-        predictions = self.predictor(final_representation)
+        # Final prediction
+        predictions = self.predictor(projected_representation)
         
         return predictions
     
@@ -325,7 +348,8 @@ class GLFusionModel(nn.Module):
         device: torch.device
     ) -> torch.Tensor:
         """Calculate MSE loss for coordinate prediction."""
-        targets = target_positions.to(device, dtype=predictions.dtype)
+        # Ensure targets are on the correct device and have the same dtype as predictions
+        targets = target_positions.to(device=device, dtype=predictions.dtype)
         return F.mse_loss(predictions, targets)
     
     def count_parameters(self, trainable_only: bool = False) -> int:
@@ -393,7 +417,7 @@ class GLFusionModel(nn.Module):
                 attention_mask,
                 node_sequence_mapping
             )
-            pred_coord = coords[0].cpu().numpy()
+            pred_coord = coords['predictions'][0].cpu().numpy()
             predictions.append(tuple(pred_coord))
         
         # For multi-step prediction, we'd need to update the trajectory

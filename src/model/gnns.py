@@ -18,15 +18,18 @@ class GAT(nn.Module):
         self.dropout = dropout
         self.convs = nn.ModuleList()
         
-        # Input layer
-        self.convs.append(GATConv(input_dim, hidden_dim, heads=heads, concat=True))
-        
-        # Hidden layers
-        for _ in range(num_layers - 2):
-            self.convs.append(GATConv(hidden_dim * heads, hidden_dim, heads=heads, concat=True))
+        if num_layers == 1:
+            # For single layer, don't concatenate heads to maintain output dimension
+            self.convs.append(GATConv(input_dim, hidden_dim, heads=heads, concat=False))
+        else:
+            # Input layer
+            self.convs.append(GATConv(input_dim, hidden_dim, heads=heads, concat=True))
             
-        # Output layer
-        if num_layers > 1:
+            # Hidden layers
+            for _ in range(num_layers - 2):
+                self.convs.append(GATConv(hidden_dim * heads, hidden_dim, heads=heads, concat=True))
+                
+            # Output layer - don't concatenate to get correct output dimension
             self.convs.append(GATConv(hidden_dim * heads, hidden_dim, heads=1, concat=False))
         
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:

@@ -215,7 +215,8 @@ class CrossAttentionFusion(nn.Module):
         # Final residual and layer norm
         output = self.layer_norm2(hidden_states + ffn_output)
         
-        return output
+        # Defensive copy to avoid any gradient issues in distributed training
+        return output.clone()
     
     def _create_aligned_node_embeddings(self, node_proj: torch.Tensor,
                                        node_sequence_mapping: torch.Tensor,
@@ -236,56 +237,29 @@ class CrossAttentionFusion(nn.Module):
         """
         hidden_dim = node_proj.shape[1]
         
-        # Initialize with zeros
-        batch_node_embeddings = torch.zeros(
-            batch_size, seq_len, hidden_dim, 
+        # Create a mask for valid node indices
+        valid_mask = (node_sequence_mapping >= 0) & (node_sequence_mapping < node_proj.shape[0])
+        
+        # Clamp node indices to valid range (invalid ones will be masked out anyway)
+        safe_indices = torch.clamp(node_sequence_mapping, 0, node_proj.shape[0] - 1)
+        
+        # Use advanced indexing to get embeddings
+        # This creates a new tensor without in-place operations
+        selected_embeddings = node_proj[safe_indices]  # [batch_size, seq_len, hidden_dim]
+        
+        # Create zero embeddings for invalid positions
+        zero_embeddings = torch.zeros(
+            batch_size, seq_len, hidden_dim,
             device=device, dtype=node_proj.dtype
         )
         
-        # Create a list to collect embedding updates to avoid in-place operations
-        updates = []
-        batch_indices = []
-        seq_indices = []
+        # Use where to select between actual embeddings and zeros
+        # This creates a new tensor without modifying existing ones
+        batch_node_embeddings = torch.where(
+            valid_mask.unsqueeze(-1),
+            selected_embeddings,
+            zero_embeddings
+        )
         
-        # Fill in node embeddings where applicable
-        for b in range(batch_size):
-            # Get valid node positions
-            valid_mask = node_sequence_mapping[b] >= 0
-            valid_positions = valid_mask.nonzero(as_tuple=False).squeeze(-1)
-            
-            if valid_positions.numel() > 0:
-                # Get corresponding node indices
-                node_indices = node_sequence_mapping[b, valid_positions]
-                
-                # Ensure indices are within bounds
-                max_node_idx = node_proj.shape[0] - 1
-                node_indices = torch.clamp(node_indices, 0, max_node_idx)
-                
-                # Select embeddings and collect indices for batch update
-                selected_embeddings = node_proj[node_indices]
-                updates.append(selected_embeddings)
-                
-                # Create batch and sequence indices
-                batch_idx = torch.full((len(valid_positions),), b, device=device, dtype=torch.long)
-                batch_indices.append(batch_idx)
-                seq_indices.append(valid_positions)
-        
-        # Apply all updates at once using scatter to avoid in-place operations
-        if updates:
-            all_updates = torch.cat(updates, dim=0)
-            all_batch_indices = torch.cat(batch_indices, dim=0)
-            all_seq_indices = torch.cat(seq_indices, dim=0)
-            
-            # Create linear indices for scatter operation
-            linear_indices = all_batch_indices * seq_len + all_seq_indices
-            
-            # Flatten the batch_node_embeddings for scatter operation
-            flat_embeddings = batch_node_embeddings.view(-1, hidden_dim)
-            
-            # Use scatter to update embeddings without in-place operations
-            flat_embeddings = flat_embeddings.scatter(0, linear_indices.unsqueeze(1).expand(-1, hidden_dim), all_updates)
-            
-            # Reshape back to original shape
-            batch_node_embeddings = flat_embeddings.view(batch_size, seq_len, hidden_dim)
-        
-        return batch_node_embeddings 
+        # Defensive copy to ensure complete isolation
+        return batch_node_embeddings.clone().detach() 

@@ -51,6 +51,9 @@ def main():
     # Setup environment
     setup_environment()
     
+    # Enable anomaly detection for debugging
+    torch.autograd.set_detect_anomaly(True)
+    
     # Parse arguments
     args = parse_args()
     
