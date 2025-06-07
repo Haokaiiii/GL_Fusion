@@ -8,6 +8,7 @@ import sys
 import logging
 import gc
 from pathlib import Path
+import torch
 
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent.parent))

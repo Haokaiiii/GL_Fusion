@@ -179,12 +179,10 @@ def load_test_data(config, task_id, split='val'):
 
 def inverse_transform_predictions(predictions, x_scaler, y_scaler):
     """Inverse transform scaled predictions back to original coordinate space."""
-    # Clamp predictions to valid range [0, 1] to prevent invalid coordinates
-    pred_x_clamped = max(0.0, min(1.0, predictions[0]))
-    pred_y_clamped = max(0.0, min(1.0, predictions[1]))
-    
-    pred_x_scaled = [[pred_x_clamped]]
-    pred_y_scaled = [[pred_y_clamped]]
+    # The model now outputs unconstrained values, so we directly use them.
+    # No clamping is needed as the model should learn the correct data distribution.
+    pred_x_scaled = [[predictions[0]]]
+    pred_y_scaled = [[predictions[1]]]
     
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=UserWarning, message="X does not have valid feature names")

@@ -9,65 +9,41 @@ from torch_geometric.nn import GATConv, GCNConv
 from torch_geometric.data import Data
 
 
-class GATModel(nn.Module):
-    """
-    Graph Attention Network (GAT) model for learning node embeddings.
-    """
+class GAT(nn.Module):
+    """Graph Attention Network (GAT) model."""
     
-    def __init__(self, in_dim, hidden_dim, out_dim, num_layers=3, heads=4, dropout=0.2):
-        """
-        Initialize the GAT model.
-        
-        Args:
-            in_dim (int): Input feature dimension.
-            hidden_dim (int): Hidden dimension.
-            out_dim (int): Output dimension.
-            num_layers (int): Number of GAT layers.
-            heads (int): Number of attention heads.
-            dropout (float): Dropout probability.
-        """
-        super(GATModel, self).__init__()
-        
-        self.num_layers = num_layers
+    def __init__(self, input_dim: int, hidden_dim: int, num_layers: int, 
+                 heads: int, dropout: float):
+        super().__init__()
         self.dropout = dropout
-        
-        # First layer
         self.convs = nn.ModuleList()
-        self.convs.append(GATConv(in_dim, hidden_dim, heads=heads, dropout=dropout))
+        
+        # Input layer
+        self.convs.append(GATConv(input_dim, hidden_dim, heads=heads, concat=True))
         
         # Hidden layers
-        for i in range(num_layers - 2):
-            self.convs.append(GATConv(hidden_dim * heads, hidden_dim, heads=heads, dropout=dropout))
-        
-        # Last layer (output single embedding vector per node)
-        if num_layers > 1:
-            self.convs.append(GATConv(hidden_dim * heads, out_dim, heads=1, dropout=dropout))
-        else:
-            self.convs.append(GATConv(in_dim, out_dim, heads=1, dropout=dropout))
-    
-    def forward(self, x, edge_index):
-        """
-        Forward pass.
-        
-        Args:
-            x (torch.Tensor): Node features [num_nodes, in_dim].
-            edge_index (torch.Tensor): Graph adjacency information [2, num_edges].
+        for _ in range(num_layers - 2):
+            self.convs.append(GATConv(hidden_dim * heads, hidden_dim, heads=heads, concat=True))
             
-        Returns:
-            torch.Tensor: Updated node embeddings [num_nodes, out_dim].
+        # Output layer
+        if num_layers > 1:
+            self.convs.append(GATConv(hidden_dim * heads, hidden_dim, heads=1, concat=False))
+        
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
         """
-        for i, conv in enumerate(self.convs[:-1]):
+        Forward pass for GAT.
+        Applies GATConv -> ReLU -> Dropout for each layer.
+        """
+        for i, conv in enumerate(self.convs):
             x = conv(x, edge_index)
-            x = F.elu(x)
-            x = F.dropout(x, p=self.dropout, training=self.training)
-        
-        # Last layer
-        x = self.convs[-1](x, edge_index)
-        
+            # No activation/dropout on the final layer's output
+            if i < len(self.convs) - 1:
+                x = F.relu(x)
+                x = F.dropout(x, p=self.dropout, training=self.training)
         return x
 
 
-class GCNModel(nn.Module):
+class GCN(nn.Module):
     """
     Graph Convolutional Network (GCN) model for learning node embeddings.
     """
@@ -83,7 +59,7 @@ class GCNModel(nn.Module):
             num_layers (int): Number of GCN layers.
             dropout (float): Dropout probability.
         """
-        super(GCNModel, self).__init__()
+        super(GCN, self).__init__()
         
         self.num_layers = num_layers
         self.dropout = dropout
@@ -143,16 +119,15 @@ def create_gnn_model(model_config, num_node_features):
     
     if model_type == 'GAT':
         heads = model_config.get('heads', 4)
-        return GATModel(
-            in_dim=num_node_features,
+        return GAT(
+            input_dim=num_node_features,
             hidden_dim=hidden_dim,
-            out_dim=out_dim,
             num_layers=num_layers,
             heads=heads,
             dropout=dropout
         )
     elif model_type == 'GCN':
-        return GCNModel(
+        return GCN(
             in_dim=num_node_features,
             hidden_dim=hidden_dim,
             out_dim=out_dim,

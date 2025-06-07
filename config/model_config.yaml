@@ -81,7 +81,7 @@ training:
   ddp_static_graph: true
   gradient_accumulation_steps: 4  # Reasonable for single GPU
   use_amp: true
-  learning_rate: 1e-4  # Slightly higher for faster convergence
+  learning_rate: 5e-5  # Reduced for more stable training with LoRA
   weight_decay: 0.01
   scheduler:
     type: "linear"

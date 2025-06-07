@@ -107,9 +107,17 @@ class GLFusionModel(nn.Module):
             nn.Linear(fusion_dim, fusion_dim // 2),
             nn.ReLU(),
             nn.Dropout(0.1),
-            nn.Linear(fusion_dim // 2, 2),  # Predict (x, y) coordinates
-            nn.Sigmoid()
+            nn.Linear(fusion_dim // 2, 2)  # Predict (x, y) coordinates
         )
+        
+        # Initialize the final layer with smaller weights to prevent initial collapse
+        # This encourages the model to start with diverse predictions
+        with torch.no_grad():
+            final_layer = self.predictor[-1]
+            nn.init.normal_(final_layer.weight, mean=0.0, std=0.01)
+            if final_layer.bias is not None:
+                # Initialize bias to roughly center of scaled coordinates (0.5, 0.5)
+                nn.init.constant_(final_layer.bias, 0.5)
         
         # Cache for graph embeddings to avoid recomputation
         self._cached_node_embeddings = None
@@ -122,9 +130,8 @@ class GLFusionModel(nn.Module):
         # Project all node features
         projected_features = self.feature_projection(self.node_features.to(device))
         
-        # Process through GNN and detach from computational graph
-        with torch.no_grad():
-            self._cached_node_embeddings = self.gnn(projected_features, self.edge_index.to(device)).detach()
+        # Process through GNN - keep in computational graph for training
+        self._cached_node_embeddings = self.gnn(projected_features, self.edge_index.to(device))
         self._cached_node_ids = torch.arange(self.node_features.shape[0], device=device)
         
         logger.info(f"Precomputed embeddings for {self.node_features.shape[0]} nodes")
@@ -204,9 +211,9 @@ class GLFusionModel(nn.Module):
         
         # Use cached embeddings if available
         if self._cached_node_embeddings is not None:
-            # Retrieve from cache. Move unique_nodes to CPU for indexing, then move result to target device.
-            # Use .clone() to create a proper copy and avoid in-place operation errors
-            node_embeddings = self._cached_node_embeddings[unique_nodes.to('cpu')].clone().to(device)
+            # Retrieve from cache. Move unique_nodes to CPU for indexing
+            # Don't use .clone() as it might break gradient flow
+            node_embeddings = self._cached_node_embeddings[unique_nodes.to('cpu')].to(device)
             
             # Create node ID mapping for compatibility
             node_id_map = {nid.item(): i for i, nid in enumerate(unique_nodes)}
@@ -299,8 +306,9 @@ class GLFusionModel(nn.Module):
             temporal_features, temporal_features, temporal_features
         )
         
-        # Take the attended representation (we can take mean or the first one)
-        final_representation = fused_temporal.mean(dim=1)
+        # Use the first (query) position instead of mean to preserve information
+        # This represents the attended temporal context
+        final_representation = fused_temporal[:, 0, :]
         
         # Apply temporal projection
         final_representation = self.temporal_projection(final_representation)
