@@ -165,23 +165,31 @@ def create_enhanced_trajectory_sequences(trajectories, enhanced_descriptions, ca
             if not node_trajectory:
                 continue
 
+            # Get the day for the journey intro
+            journey_day = node_trajectory[0][1]
+            day_type = "weekend" if (journey_day - 1) % 7 >= 5 else "weekday"
+            intro = f"User's journey on {day_type} day {journey_day}:"
+
             for i, (node_id, day, time) in enumerate(node_trajectory):
                 location_desc = enhanced_descriptions.get(node_id, f"location {node_id}")
                 
                 # Extract key features for narrative
                 if "Primary functions:" in location_desc:
                     features = location_desc.split("Primary functions:")[1].split(".")[0].strip()
-                    features = f"area with {features}"
+                    features = f"an area with {features}"
                 elif "Features:" in location_desc:
                     features = location_desc.split("Features:")[1].split(".")[0].strip()
-                    features = f"area featuring {features}"
+                    features = f"an area featuring {features}"
                 elif "residential" in location_desc.lower():
-                    features = "residential area"
+                    features = "a residential area"
                 else:
-                    features = "location"
+                    features = "an unknown location"
                 
                 # Time context for LLM understanding
                 hour = time % 24
+                minute = (time * 2) % 60 # Assuming 30-min intervals
+                time_str = f"{hour:02d}:{minute:02d}"
+
                 if 5 <= hour < 9:
                     time_period = "early morning"
                 elif 9 <= hour < 12:
@@ -191,24 +199,22 @@ def create_enhanced_trajectory_sequences(trajectories, enhanced_descriptions, ca
                 elif 14 <= hour < 17:
                     time_period = "afternoon"
                 elif 17 <= hour < 20:
-                    time_period = "evening rush"
-                elif 20 <= hour < 23:
                     time_period = "evening"
+                elif 20 <= hour < 23:
+                    time_period = "late evening"
                 else:
                     time_period = "late night"
                 
-                day_type = "weekend" if (day - 1) % 7 >= 5 else "weekday"
-                
                 if i == 0:
                     narrative_parts.append(
-                        f"Journey starts on {day_type} day {day} during {time_period} at {features}"
+                        f"starts at {time_str} ({time_period}) at Node {node_id}, {features}"
                     )
                 else:
-                    narrative_parts.append(f"moves to {features}")
+                    narrative_parts.append(f"at {time_str} ({time_period}) at Node {node_id}, {features}")
             
             enhanced_sequences[split][uid] = {
                 'tokens': node_trajectory,
-                'narrative': ". Then ".join(narrative_parts) + ".",
+                'narrative': intro + " " + "; ".join(narrative_parts) + ".",
                 'node_descriptions': {node_id: enhanced_descriptions.get(node_id, "") for node_id, _, _ in node_trajectory}
             }
     

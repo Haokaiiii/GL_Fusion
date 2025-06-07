@@ -35,16 +35,36 @@ class QwenModel(nn.Module):
         
         logger.info(f"Initializing Qwen model from: {model_path}")
         
-        # Initialize tokenizer
-        self._init_tokenizer(model_path)
+        # Initialize tokenizer (without adding special tokens yet)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_path,
+            use_fast=True,
+            trust_remote_code=True,
+            pad_token='<|endoftext|>'
+        )
         
         # Initialize model with optional quantization
         self._init_model(model_path, llm_config)
+        
+        # **NEW: Add special tokens and resize embeddings BEFORE applying LoRA**
+        self._add_special_tokens_and_resize()
         
         # Apply LoRA if configured
         if llm_config.get('use_lora', False):
             self._apply_lora(llm_config)
     
+    def _add_special_tokens_and_resize(self):
+        """Add special tokens and resize the model's token embeddings."""
+        special_tokens = TokenConfig.get_all_special_tokens()
+        num_added = self.tokenizer.add_special_tokens({
+            'additional_special_tokens': special_tokens
+        })
+        
+        if num_added > 0:
+            logger.info(f"Added {num_added} special tokens to tokenizer")
+            self.model.resize_token_embeddings(len(self.tokenizer))
+            logger.info(f"Resized model embeddings to: {len(self.tokenizer)}")
+
     def _init_tokenizer(self, model_path: str):
         """Initialize tokenizer with special tokens."""
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -54,14 +74,7 @@ class QwenModel(nn.Module):
             pad_token='<|endoftext|>'
         )
         
-        # Add special tokens from central config
-        special_tokens = TokenConfig.get_all_special_tokens()
-        num_added = self.tokenizer.add_special_tokens({
-            'additional_special_tokens': special_tokens
-        })
-        
-        if num_added > 0:
-            logger.info(f"Added {num_added} special tokens to tokenizer")
+        # Special tokens are now added in a separate method
     
     def _init_model(self, model_path: str, llm_config: Dict[str, Any]):
         """Initialize the model with optional quantization."""

@@ -38,19 +38,16 @@ class ModelFactory:
         logger.info("Building GL-Fusion model...")
         model = GLFusionModel(config)
         
-        # Resize embeddings if needed
-        tokenizer = ModelFactory._get_tokenizer(config)
-        special_tokens_dict = {'additional_special_tokens': TokenConfig.get_all_special_tokens()}
-        num_added_toks = tokenizer.add_special_tokens(special_tokens_dict)
-        
-        if num_added_toks > 0 and hasattr(model, 'llm') and hasattr(model.llm, 'model'):
-            if hasattr(model.llm.model, 'resize_token_embeddings'):
-                model.llm.model.resize_token_embeddings(len(tokenizer))
-                logger.info(f"Resized LLM token embeddings to {len(tokenizer)}")
-                
-        # Log model statistics
+        # The resizing is now handled inside the LLMWrapper.
+        # This call is no longer needed and causes errors with LoRA.
+        # tokenizer = model.llm.tokenizer
+        # if len(tokenizer) != model.llm.model.get_input_embeddings().weight.shape[0]:
+        #     logger.info(f"Resizing LLM token embeddings to {len(tokenizer)}")
+        #     model.llm.model.resize_token_embeddings(len(tokenizer))
+
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        
         logger.info(f"Model built: {total_params:,} total params, {trainable_params:,} trainable params")
         
         return model
