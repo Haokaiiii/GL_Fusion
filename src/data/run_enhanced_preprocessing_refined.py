@@ -142,7 +142,7 @@ def generate_enhanced_node_descriptions(node_mapping, cell_poi_df, poi_categorie
     logger.info(f"Generated enhanced descriptions for {len(enhanced_descriptions)} locations")
     return enhanced_descriptions, category_mapping
 
-def create_enhanced_trajectory_sequences(trajectories, enhanced_descriptions, category_mapping):
+def create_enhanced_trajectory_sequences(trajectories, enhanced_descriptions, category_mapping, node_mapping):
     """Create enhanced trajectory sequences with rich narratives."""
     logger.info("Creating enhanced trajectory sequences with rich narratives...")
     
@@ -151,11 +151,21 @@ def create_enhanced_trajectory_sequences(trajectories, enhanced_descriptions, ca
     for split in ['train', 'val']:
         enhanced_sequences[split] = {}
         
-        for uid, trajectory in tqdm(trajectories[split].items(), desc=f"Processing {split}"):
+        for uid, raw_trajectory in tqdm(trajectories[split].items(), desc=f"Processing {split}"):
             # Create narrative for LLM understanding
             narrative_parts = []
             
-            for i, (node_id, day, time) in enumerate(trajectory):
+            # Convert raw trajectory (with x,y) to node-based trajectory
+            node_trajectory = []
+            for d, t, x, y in raw_trajectory:
+                node_id = node_mapping.get((x, y))
+                if node_id is not None:
+                    node_trajectory.append((node_id, d, t))
+
+            if not node_trajectory:
+                continue
+
+            for i, (node_id, day, time) in enumerate(node_trajectory):
                 location_desc = enhanced_descriptions.get(node_id, f"location {node_id}")
                 
                 # Extract key features for narrative
@@ -197,9 +207,9 @@ def create_enhanced_trajectory_sequences(trajectories, enhanced_descriptions, ca
                     narrative_parts.append(f"moves to {features}")
             
             enhanced_sequences[split][uid] = {
-                'tokens': trajectory,
+                'tokens': node_trajectory,
                 'narrative': ". Then ".join(narrative_parts) + ".",
-                'node_descriptions': {node_id: enhanced_descriptions.get(node_id, "") for node_id, _, _ in trajectory}
+                'node_descriptions': {node_id: enhanced_descriptions.get(node_id, "") for node_id, _, _ in node_trajectory}
             }
     
     return enhanced_sequences
@@ -268,7 +278,7 @@ def run_enhanced_preprocessing(task_id=2):
     # Enhanced trajectory sequences
     logger.info("Step 4: Creating enhanced trajectory sequences...")
     enhanced_sequences = create_enhanced_trajectory_sequences(
-        trajectories, enhanced_descriptions, category_mapping
+        trajectories, enhanced_descriptions, category_mapping, node_mapping
     )
     
     # Construct graph (standard)
