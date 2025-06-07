@@ -98,17 +98,24 @@ def load_model_with_scaling_support(checkpoint_path, config, device):
         logger.error(f"Failed to load checkpoint: {e}")
         raise
     
-    # Handle tokenizer size mismatch
+    # Handle tokenizer size mismatch - but skip for LoRA models
     current_vocab_size = model.llm.model.get_input_embeddings().weight.shape[0]
     checkpoint_vocab_size = checkpoint['model_state_dict']['llm.model.base_model.model.model.embed_tokens.weight'].shape[0]
     
     logger.info(f"Current model vocab size: {current_vocab_size}")
     logger.info(f"Checkpoint vocab size: {checkpoint_vocab_size}")
     
+    # Check if this is a LoRA model by looking for LoRA-specific keys in the checkpoint
+    is_lora_model = any('lora' in key.lower() for key in checkpoint['model_state_dict'].keys())
+    
     if current_vocab_size != checkpoint_vocab_size:
-        logger.info(f"Tokenizer size mismatch detected. Resizing model to match checkpoint...")
-        model.llm.model.resize_token_embeddings(checkpoint_vocab_size)
-        logger.info(f"Model resized to {checkpoint_vocab_size} tokens")
+        if is_lora_model:
+            logger.info("LoRA model detected - skipping embedding resize to avoid LoRA compatibility issues")
+            logger.info("For LoRA models, vocabulary mismatch is handled during state dict loading")
+        else:
+            logger.info(f"Tokenizer size mismatch detected. Resizing model to match checkpoint...")
+            model.llm.model.resize_token_embeddings(checkpoint_vocab_size)
+            logger.info(f"Model resized to {checkpoint_vocab_size} tokens")
     
     # Load state dict
     try:

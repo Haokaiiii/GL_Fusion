@@ -38,14 +38,23 @@ llm:
   device: "auto"
   use_lora: true
   lora_config:
-    r: 8
-    lora_alpha: 16
-    lora_dropout: 0.05
-    bias: "none"
-    target_modules: ["q_proj", "v_proj"]
-  hidden_size: 3584  # Example hidden size for LLM
-  sequence_length: 512  # Max sequence length for LLM input
-  node_text_sequence_length: 64  # Max length for node text descriptions
+    r: 64                    # Increased to 64 for Qwen2.5's complexity
+    lora_alpha: 128          # Set to 2*r for optimal scaling
+    lora_dropout: 0.1        # Keep at 0.1 for good regularization
+    bias: "lora_only"        # Enable LoRA bias adaptation for Qwen2.5
+    # Optimized for Qwen2.5 architecture with GQA and SwiGLU
+    target_modules: [
+      "q_proj", "k_proj", "v_proj", "o_proj",  # Attention projections
+      "gate_proj", "up_proj", "down_proj",     # SwiGLU MLP components
+      "embed_tokens", "lm_head"                # Input/output embeddings
+    ]
+    # Advanced LoRA settings for Qwen2.5
+    task_type: "CAUSAL_LM"
+    inference_mode: false
+    modules_to_save: ["embed_tokens", "lm_head"]  # Save embedding adaptations
+  hidden_size: 3584  # Qwen2.5-7B hidden size
+  sequence_length: 2048  # Increased from 512 to better utilize context
+  node_text_sequence_length: 128  # Increased for better node descriptions
   quantization:
     load_in_8bit: false
     load_in_4bit: false  # Set to true for 4-bit quantization if needed
@@ -73,24 +82,27 @@ twin_predictor:
 
 # Training Parameters
 training:
-  batch_size: 1     # Start with 1 for stability
+  batch_size: 1     # Start with 1 due to increased sequence length
   num_epochs: 50     # Increased for production training
   gradient_clip_val: 1.0
-  early_stopping_patience: 5  # Increased for production training
+  early_stopping_patience: 7  # Increased patience for Qwen2.5
   validation_interval: 1
   ddp_static_graph: true
-  gradient_accumulation_steps: 4  # Reasonable for single GPU
+  gradient_accumulation_steps: 8  # Increased to simulate larger batch
   use_amp: true
-  learning_rate: 5e-5  # Reduced for more stable training with LoRA
+  learning_rate: 2e-4  # Higher LR works better with larger LoRA rank
   weight_decay: 0.01
   scheduler:
-    type: "linear"
-    num_warmup_steps: 500  # Increased for longer training
-    warmup_ratio: 0.1
-    patience: 2
+    type: "cosine"   # Cosine scheduler works better for Qwen models
+    num_warmup_steps: 2000  # Longer warmup for stability
+    warmup_ratio: 0.05  # 5% warmup
+    patience: 3
     factor: 0.5
   seed: 42
-  train_data_subsample_ratio: 1.0  # Default to full dataset
+  train_data_subsample_ratio: 0.5  # 50% of dataset (can be overridden by DATA_SUBSAMPLE_RATIO env var)
+  # Qwen2.5 specific optimizations
+  max_grad_norm: 1.0  # Explicit gradient norm clipping
+  dataloader_num_workers: 4  # Parallel data loading
 
 # Evaluation Parameters
 evaluation:

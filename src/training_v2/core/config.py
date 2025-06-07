@@ -68,10 +68,10 @@ class ConfigManager:
         """Merge environment variable overrides."""
         # Data subsampling
         if 'DATA_SUBSAMPLE_RATIO' in os.environ:
-            self.config['data']['train_data_subsample_ratio'] = float(os.environ['DATA_SUBSAMPLE_RATIO'])
+            self.config['training']['train_data_subsample_ratio'] = float(os.environ['DATA_SUBSAMPLE_RATIO'])
             
         if 'VAL_DATA_SUBSAMPLE_RATIO' in os.environ:
-            self.config['data']['val_data_subsample_ratio'] = float(os.environ['VAL_DATA_SUBSAMPLE_RATIO'])
+            self.config['training']['val_data_subsample_ratio'] = float(os.environ['VAL_DATA_SUBSAMPLE_RATIO'])
             
         if 'MAX_VAL_USERS' in os.environ:
             self.config['training']['max_val_users'] = int(os.environ['MAX_VAL_USERS'])

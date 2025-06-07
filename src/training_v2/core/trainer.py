@@ -99,6 +99,7 @@ class Trainer:
             num_epochs: Number of epochs to train
             start_epoch: Starting epoch (for resuming)
         """
+        torch.autograd.set_detect_anomaly(True)
         self.current_epoch = start_epoch
         
         for epoch in range(start_epoch, num_epochs):
