@@ -21,7 +21,7 @@ from data.preprocess import (
 )
 from data.enhanced_preprocess_refined import (
     load_real_poi_categories, create_detailed_poi_description,
-    generate_enhanced_node_descriptions
+    generate_enhanced_semantic_descriptions
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -102,7 +102,7 @@ def run_token_efficient_preprocessing(task_id=2):
     
     node_mapping, node_features = create_node_features(task1_df, task2_df, cell_poi_df, poi_categories_df, config)
     
-    enhanced_descriptions, category_mapping = generate_enhanced_node_descriptions(
+    enhanced_descriptions, category_mapping = generate_enhanced_semantic_descriptions(
         node_mapping, cell_poi_df, poi_categories_df, task1_df, task2_df, config
     )
     
