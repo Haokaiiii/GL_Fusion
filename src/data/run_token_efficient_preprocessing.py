@@ -98,6 +98,10 @@ def run_token_efficient_preprocessing(task_id=2):
     task1_df, task2_df, cell_poi_df, poi_categories_df = load_data(config)
     task1_splits, task2_splits = define_data_splits(task1_df, task2_df, config)
     
+    task1_trajectories, task2_trajectories = form_trajectories(
+        task1_df, task2_df, task1_splits, task2_splits
+    )
+
     trajectories = task2_trajectories if task_id == 2 else task1_trajectories
     
     node_mapping, node_features = create_node_features(task1_df, task2_df, cell_poi_df, poi_categories_df, config)
